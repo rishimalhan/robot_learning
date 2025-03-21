@@ -17,3 +17,4 @@ qttools5-dev-tools
 qt5-qmake
 libqt5svg5-dev
 ros-noetic-moveit
+ros-noetic-industrial-robot-simulator

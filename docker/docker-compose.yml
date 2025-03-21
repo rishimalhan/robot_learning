@@ -21,6 +21,7 @@ services:
     network_mode: "host"
     depends_on:
       - vnc
+      
   vnc:
     image: dorowu/ubuntu-desktop-lxde-vnc:focal-arm64
     environment:
