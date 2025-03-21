@@ -1,0 +1,3 @@
+- git:
+    local-name: abb_moveit_config
+    uri: https://github.com/ros-industrial/abb.git
