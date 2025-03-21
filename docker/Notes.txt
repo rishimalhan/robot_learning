@@ -1,0 +1,40 @@
+### Conda use ###
+colcon build --symlink-install --merge-install --install-base $CONDA_PREFIX --build-base $CONDA_PREFIX --cmake-args -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX
+catkin config --install && catkin build --cmake-args -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX
+
+### ROS Communication ###
+ifconfig | grep "inet " # mamba
+docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <container_name_or_id>
+
+On ubuntu
+export ROS_STATIC_PEERS=10.189.129.123
+
+Other env vars
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+Docker network mode host doesn't require ports since it extends host's configuration
+Two multicast receivers cannot work in two mamba instances since it listens on one ports
+Macbook has docker desktop so we had to enable host network internally
+
+Debug tools
+ros2 run demo_nodes_py talker
+ros2 multicast receive
+ros2 multicast send
+docker inspect <container_name_or_id>
+
+
+### catkin commands ###
+wstool init /robot_application/src/deps/ /robot_application/src/.rosinstall
+
+# Below didn't work well
+catkin config --install
+catkin config --cmake-args -DCMAKE_BUILD_TYPE=Release
+catkin config --isolate-devel
+catkin config --isolate-install
+catkin build ros_industrial_cmake_boilerplate descartes_light ruckig trajopt_common trajopt_ifopt tesseract_common trajopt -j14
+
+
+# New approach
+# 1. Reset the workspace to use the default merged layout for devel space (like standard ROS)
+catkin config --extend /opt/ros/noetic --merge-devel --cmake-args -DCMAKE_BUILD_TYPE=Release --no-install --jobs 14

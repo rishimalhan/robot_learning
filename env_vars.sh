@@ -1,0 +1,3 @@
+export ENV_NAME=ur10_planning
+export ROBOT_NAME=ur10
+export ROBOT_DESCRIPTION_PKG=ur_description

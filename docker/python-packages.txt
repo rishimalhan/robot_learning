@@ -1,0 +1,16 @@
+ipython
+matplotlib
+pandas
+transformers
+datasets
+tiktoken
+wandb
+tqdm
+scipy
+torch
+torchvision
+torchaudio
+pygame
+gym
+trimesh
+numpy
