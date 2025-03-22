@@ -1,5 +1,11 @@
 ### Conda use ###
-colcon build --symlink-install --merge-install --install-base $CONDA_PREFIX --build-base $CONDA_PREFIX --cmake-args -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX
+catkin config \
+  --install \
+  --install-space $CONDA_PREFIX/install \
+  --devel-space $CONDA_PREFIX/devel \
+  --build-space $CONDA_PREFIX/build \
+  --log-space $CONDA_PREFIX/logs \
+  --cmake-args -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX/install
 
 ### catkin commands ###
 wstool init /robot_learning/src/deps/ /robot_learning/.rosinstall

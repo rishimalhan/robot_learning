@@ -9,6 +9,7 @@
        - and uncomment the following line: -->
   <rosparam command="load" file="$(find abb_irb2400_support)/config/joint_names_irb2400.yaml" />
   <param name="default_planning_pipeline" value="ompl"/>
+  <param name="move_group/plugin_description" value="$(find moveit_ros_move_group)/default_capabilities_plugin_description.xml"/>
   
   <!-- the "sim" argument controls whether we connect to a Simulated or Real robot -->
   <!--  - if sim=false, a robot_ip argument is required -->
