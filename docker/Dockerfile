@@ -1,5 +1,7 @@
-# Use ROS1 Noetic base image
-FROM --platform=linux/arm64 osrf/ros:noetic-desktop-full
+# Use an LXDE+VNC base image (includes noVNC at port 8080)
+FROM dorowu/ubuntu-desktop-lxde-vnc:focal-arm64
+
+USER root
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -19,29 +21,24 @@ RUN apt-get update && \
     cmake \
     iproute2 \
     iputils-ping \
-    net-tools && \
+    net-tools \
+    novnc \
+    x11vnc \
+    python3-websockify && \
     rm -rf /var/lib/apt/lists/*
-
-# Make sure curl is available before downloading keys
-RUN apt-get install -y curl
-
-# Add ROS key (ONLY IF NOT ALREADY PRESENT)
-RUN if [ ! -f "/usr/share/keyrings/ros-archive-keyring.gpg" ]; then \
-        curl -sSL 'https://raw.githubusercontent.com/ros/rosdistro/master/ros.key' | apt-key add -; \
-    fi
-
-# Remove conflicting sources list if they exist
-RUN rm -f /etc/apt/sources.list.d/ros-latest.list /etc/apt/sources.list.d/ros2.list /etc/apt/sources.list.d/ros1.list
-
-# Update and upgrade system packages safely
-RUN apt-get update && apt-get upgrade -y && apt-get autoremove -y
-
-# Initialize rosdep
-RUN rosdep init || true && rosdep update
 
 # Allow pip to manage system-wide Python packages (Override PEP 668)
 RUN pip config set global.break-system-packages true
-
+# Install ROS1
+RUN sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list'
+RUN curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo apt-key add -
+RUN apt update
+RUN apt install ros-noetic-desktop-full -y
+RUN echo "source /opt/ros/noetic/setup.bash" >> ~/.bashrc
+RUN apt install python3-rosdep python3-rosinstall python3-rosinstall-generator python3-wstool build-essential -y
+RUN apt install python3-rosdep -y
+RUN rosdep init
+RUN rosdep update
 # Install catkin for ROS1 package building
 RUN apt-get install -y python3-catkin-tools
 
