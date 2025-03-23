@@ -1,12 +1,17 @@
 ### Conda use ###
+1. Clean all catkin directories
+
+2. Create temporary catkin profile
 catkin config \
   --install \
-  --install-space $CONDA_PREFIX/install \
+  --install-space $CONDA_PREFIX \
   --devel-space $CONDA_PREFIX/devel \
   --build-space $CONDA_PREFIX/build \
   --log-space $CONDA_PREFIX/logs \
-  --cmake-args -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX/install
+  --cmake-args -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX
+
+3. then remove .catkin_tools directory and build ubuntu packages
 
 ### catkin commands ###
 wstool init /robot_learning/src/deps/ /robot_learning/.rosinstall
-catkin config --jobs 14
+catkin config --jobs 14 -DCMAKE_BUILD_TYPE=Release

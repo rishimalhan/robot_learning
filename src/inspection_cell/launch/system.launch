@@ -47,9 +47,11 @@
     <arg name="publish_monitored_planning_scene" value="true" />
   </include>
 
-  <include file="$(find abb_irb2400_moveit_config)/launch/moveit_rviz.launch">
-    <arg name="config" value="true"/>
-  </include>
+  <!-- Launch RViz with custom configuration -->
+  <node name="rviz" pkg="rviz" type="rviz" respawn="false" output="screen"
+        args="-d $(find inspection_cell)/config/system.rviz">
+    <rosparam command="load" file="$(find abb_irb2400_moveit_config)/config/kinematics.yaml"/>
+  </node>
 
   <!-- If database loading was enabled, start mongodb as well -->
   <include file="$(find abb_irb2400_moveit_config)/launch/default_warehouse_db.launch" if="$(arg db)">
