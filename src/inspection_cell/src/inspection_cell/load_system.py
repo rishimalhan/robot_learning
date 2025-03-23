@@ -169,13 +169,13 @@ class EnvironmentLoader:
                     # Create mesh for collision object
                     from shape_msgs.msg import Mesh, MeshTriangle
                     co_mesh = Mesh()
-                    
+                    scale = obj.get('scale', [1.0, 1.0, 1.0])
                     # Add vertices
                     for point in mesh.points:
                         vertex = Point()
-                        vertex.x = point[0]
-                        vertex.y = point[1]
-                        vertex.z = point[2]
+                        vertex.x = point[0] * scale[0]
+                        vertex.y = point[1] * scale[1]
+                        vertex.z = point[2] * scale[2]
                         co_mesh.vertices.append(vertex)
                     
                     # Add triangles
@@ -189,7 +189,7 @@ class EnvironmentLoader:
                     if not co_mesh.triangles:
                         rospy.logerr(f"No triangles found in mesh {mesh_path}")
                         continue
-                        
+                    
                     # Add mesh to collision object
                     collision_object.meshes.append(co_mesh)
                     
