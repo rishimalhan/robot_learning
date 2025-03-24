@@ -33,6 +33,43 @@ class CollisionCheck:
         )
         rospy.loginfo("State validity service connected")
 
+        # Log collision bodies
+        self.log_collision_bodies()
+
+    def log_collision_bodies(self):
+        """Log all collision bodies currently in the planning scene"""
+        rospy.loginfo("Logging active collision bodies in planning scene:")
+
+        # Get all links in the robot
+        robot_links = self.robot.get_link_names()
+        rospy.loginfo("Robot links (%d):", len(robot_links))
+        for link in robot_links:
+            rospy.loginfo(f"  - {link}")
+
+        # Get all collision objects in the world
+        try:
+            # Create planning scene interface to get objects
+            scene = moveit_commander.PlanningSceneInterface()
+            # Wait a bit for the interface to connect
+            rospy.sleep(0.5)
+
+            # Get objects and attached objects
+            world_objects = scene.get_objects()
+            attached_objects = scene.get_attached_objects()
+
+            rospy.loginfo("World objects (%d):", len(world_objects))
+            for obj_name in world_objects:
+                rospy.loginfo(f"  - {obj_name}")
+
+            rospy.loginfo("Attached objects (%d):", len(attached_objects))
+            for obj_name in attached_objects:
+                rospy.loginfo(f"  - {obj_name}")
+
+        except Exception as e:
+            rospy.logwarn(f"Error getting collision objects: {e}")
+
+        rospy.loginfo("Collision body logging complete")
+
     def check_state_validity(self, joint_values=None):
         """
         Efficiently check if a robot state is valid (collision-free).

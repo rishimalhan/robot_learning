@@ -36,10 +36,6 @@ class EnvironmentLoader:
         self.robot = RobotCommander()
         self.group_name = move_group_name
 
-        # Initialize the optimized collision checker
-        self.collision_checker = CollisionCheck(move_group_name=move_group_name)
-        rospy.loginfo("Collision checker initialized")
-
         # Create RosPack instance
         self.rospack = rospkg.RosPack()
 
@@ -73,6 +69,11 @@ class EnvironmentLoader:
 
         # Print current scene objects
         self._print_scene_objects()
+
+        # Initialize the optimized collision checker AFTER environment is fully loaded
+        rospy.loginfo("Initializing collision checker after environment setup...")
+        self.collision_checker = CollisionCheck(move_group_name=move_group_name)
+        rospy.loginfo("Collision checker initialized")
 
     def clear_scene(self):
         """Clear all objects from the planning scene."""

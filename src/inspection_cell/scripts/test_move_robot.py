@@ -51,10 +51,6 @@ class RobotMover:
                 self.robot = moveit_commander.RobotCommander()
                 self.group_name = move_group_name
 
-                # Initialize the collision checker
-                self.collision_checker = CollisionCheck(move_group_name=move_group_name)
-                rospy.loginfo("Collision checker initialized")
-
                 # Create RosPack instance
                 self.rospack = rospkg.RosPack()
 
@@ -90,6 +86,13 @@ class RobotMover:
 
                 # Print current scene objects
                 self._print_scene_objects()
+
+                # Initialize the collision checker AFTER environment is fully loaded
+                rospy.loginfo(
+                    "Initializing collision checker after environment setup..."
+                )
+                self.collision_checker = CollisionCheck(move_group_name=move_group_name)
+                rospy.loginfo("Collision checker initialized")
 
             def check_collision(self, joint_positions=None, group_name=None):
                 """Check if a robot state is in collision using the collision checker.
