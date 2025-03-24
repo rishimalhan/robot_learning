@@ -1,0 +1,51 @@
+# Environment configuration for MoveIt scene
+# Each object can be a box, sphere, cylinder, or mesh
+# All dimensions are in meters
+# Colors are in RGB format (0-1)
+# Transforms are in the world frame
+
+objects:
+  # Box object
+  platform:
+    type: box
+    dimensions: [5.0, 5.0, 0.025]  # length, width, height
+    pose:
+      position: [0.0, 0.0, -0.013]  # x, y, z
+      orientation: [0.0, 0.0, 0.0]  # roll, pitch, yaw
+    color: [0.8, 0.8, 0.8]  # light gray
+    alpha: 1.0
+    collision_enabled: true
+    visible: true
+  
+  # Back wall
+  back_wall:
+    type: box
+    dimensions: [0.025, 5.0, 5.0]
+    pose:
+      position: [-0.6, 0.0, 2.5]
+      orientation: [0.0, 0.0, 0.0]
+    color: [0.8, 0.8, 0.8]  # light gray
+    alpha: 0.0
+    collision_enabled: true
+    visible: true
+
+  # Mesh object
+  table_mesh:
+    type: mesh
+    mesh_path: "package://inspection_cell/assets/table.stl"
+    pose:
+      position: [1.0, 0.0, 0.6]
+      orientation: [1.57, 0.0, 1.57]
+    color: [0.588, 0.588, 0.557]
+    alpha: 1.0
+    scale: [1.0, 0.7, 1.0]
+    collision_enabled: true
+    visible: true
+
+# Robot configuration
+robot:
+  group_name: "manipulator"
+  planning_time: 2.0
+  num_planning_attempts: 5
+  max_velocity_scaling_factor: 1.0
+  max_acceleration_scaling_factor: 1.0 
