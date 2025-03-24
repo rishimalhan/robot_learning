@@ -131,7 +131,7 @@ class RobotMover:
 
         return is_valid
 
-    def generate_plans(self, num_plans=5):
+    def generate_plans(self, num_plans=20):
         """Generate and execute multiple plans"""
         # Check current state for collisions
         rospy.loginfo("Checking current state for collisions...")
