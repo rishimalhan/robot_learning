@@ -41,6 +41,17 @@ objects:
     collision_enabled: true
     visible: true
 
+  platform:
+    type: box
+    dimensions: [0.8, 2.0, 0.7]
+    pose:
+      position: [1.0, 0.0, 0.75]
+      orientation: [0.0, 0.0, 0.0]
+    color: [0.0, 1.0, 0.0]
+    alpha: 0.1
+    collision_enabled: false
+    visible: true
+
   # Mesh object
   table_mesh:
     type: mesh

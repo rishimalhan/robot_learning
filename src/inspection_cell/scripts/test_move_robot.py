@@ -245,6 +245,9 @@ def main():
         # Create robot mover and generate plans
         robot_mover = RobotMover()
 
+        rospy.spin()
+        raise Exception("Stop here")
+
         # Check if specific named targets are available
         if "all-zeros" in robot_mover.named_targets:
             # Move to all-zeros named target
