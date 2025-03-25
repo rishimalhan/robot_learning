@@ -1,42 +1,27 @@
 #!/usr/bin/env python3
 
 import rospy
-import moveit_commander
-import moveit_msgs.msg
-import random
 import sys
 import time
 import traceback
-from std_msgs.msg import String
-from neural_engine.srv import SampleConfig
 from inspection_cell.load_system import EnvironmentLoader
-from inspection_cell.collision_checker import CollisionCheck
-from inspection_cell.error_codes import get_error_code_name, get_error_description
-import rospkg
-
-HOME = [0, 0.0, 0, 0, 0.0, 0]
+from inspection_cell.planner import Planner
+from inspection_cell.executor import Executor
 
 
 class RobotMover:
     def __init__(self):
-        # Initialize MoveIt commander
-        moveit_commander.roscpp_initialize(sys.argv)
-
-        # Create a modified EnvironmentLoader that doesn't initialize the node
+        # Initialize the environment loader
         self.env_loader = self._create_environment()
 
-        # Get the move group from the environment loader
-        self.move_group = self.env_loader.get_move_group()
+        # Initialize the planner and executor
+        self.planner = Planner(move_group_name="manipulator")
+        self.executor = Executor(move_group_name="manipulator", check_collisions=True)
 
-        # Display information about the robot
-        self.robot = moveit_commander.RobotCommander()
-        rospy.loginfo(
-            "Planning reference frame: %s", self.move_group.get_planning_frame()
-        )
-        rospy.loginfo("End effector link: %s", self.move_group.get_end_effector_link())
-        rospy.loginfo(
-            "Available planning groups: %s", ", ".join(self.robot.get_group_names())
-        )
+        # Get available named targets
+        self.named_targets = self.planner.get_named_targets()
+
+        rospy.loginfo("RobotMover initialized with Planner and Executor")
 
     def _create_environment(self):
         """Create a modified version of EnvironmentLoader that doesn't initialize a node"""
@@ -45,6 +30,12 @@ class RobotMover:
         class ModifiedEnvironmentLoader(EnvironmentLoader):
             def __init__(self, move_group_name="manipulator", clear_scene=True):
                 # Skip the parent class's __init__ to avoid initializing a node
+                import moveit_commander
+                import rospkg
+                import os
+                import yaml
+                from inspection_cell.collision_checker import CollisionCheck
+
                 # Initialize attributes directly
                 self.scene = moveit_commander.PlanningSceneInterface()
                 self.move_group = moveit_commander.MoveGroupCommander(move_group_name)
@@ -63,9 +54,6 @@ class RobotMover:
                     self.clear_scene()
 
                 # Load environment configuration using rospkg
-                import os
-                import yaml
-
                 config_path = os.path.join(
                     self.rospack.get_path("inspection_cell"),
                     "config",
@@ -94,137 +82,159 @@ class RobotMover:
                 self.collision_checker = CollisionCheck(move_group_name=move_group_name)
                 rospy.loginfo("Collision checker initialized")
 
-            def check_collision(self, joint_positions=None, group_name=None):
-                """Check if a robot state is in collision using the collision checker.
-
-                Args:
-                    joint_positions: List of joint positions to check. If None, the current robot state is used.
-                    group_name: Name of the move group to check. Ignored if using the optimized checker.
-
-                Returns:
-                    tuple: (is_valid, contacts) where is_valid is a boolean and contacts is a list of collision contacts
-                """
-                # Use the collision checker
-                is_valid = self.collision_checker.check_state_validity(joint_positions)
-
-                # Return the result and contacts
-                return is_valid, self.collision_checker.last_contacts
-
         # Create and return the modified environment loader
         rospy.loginfo("Loading environment...")
         return ModifiedEnvironmentLoader(
             move_group_name="manipulator", clear_scene=True
         )
 
-    def check_collision(self, joints=None):
-        """Check if the robot is in collision at the specified joint values"""
-        # Use the collision checker from the environment loader
-        is_valid, contacts = self.env_loader.check_collision(joints)
+    def move_to_home(self):
+        """Move the robot to the home position using named target if available"""
+        rospy.loginfo("Planning motion to home position...")
 
-        # Get collision report if in collision
-        if not is_valid:
-            collision_report = self.env_loader.collision_checker.get_collision_report()
-            rospy.logwarn("Robot state is in collision!")
-            rospy.logwarn(collision_report)
+        # Plan to the home position (planner will try to use named target)
+        success, plan, planning_time, error_code = self.planner.plan_to_home()
+
+        if success and plan:
+            rospy.loginfo(
+                f"Plan to home position successful, execution time: {planning_time:.2f} seconds"
+            )
+
+            # Execute the plan
+            execution_success = self.executor.execute_plan(plan, verify_safety=True)
+
+            if execution_success:
+                rospy.loginfo("Successfully moved to home position")
+                return True
+            else:
+                rospy.logerr("Failed to execute plan to home position")
+                return False
         else:
-            rospy.loginfo("Robot state is collision-free")
+            rospy.logerr("Failed to plan to home position")
+            return False
 
-        return is_valid
+    def move_to_named_target(self, target_name):
+        """Move the robot to a named target from the SRDF file"""
+        if target_name not in self.named_targets:
+            rospy.logerr(
+                f"Named target '{target_name}' not available. Available targets: {self.named_targets}"
+            )
+            return False
+
+        rospy.loginfo(f"Planning motion to named target: {target_name}")
+
+        # Plan to the named target
+        success, plan, planning_time, error_code = self.planner.plan_to_named_target(
+            target_name
+        )
+
+        if success and plan:
+            rospy.loginfo(
+                f"Plan to '{target_name}' successful, execution time: {planning_time:.2f} seconds"
+            )
+
+            # Execute the plan
+            execution_success = self.executor.execute_plan(plan, verify_safety=True)
+
+            if execution_success:
+                rospy.loginfo(f"Successfully moved to named target: {target_name}")
+                return True
+            else:
+                rospy.logerr(f"Failed to execute plan to named target: {target_name}")
+                return False
+        else:
+            rospy.logerr(f"Failed to plan to named target: {target_name}")
+            return False
 
     def generate_plans(self, num_plans=5):
-        """Generate and execute multiple plans"""
-        # Check current state for collisions
-        rospy.loginfo("Checking current state for collisions...")
-        self.env_loader.check_collision(HOME)
+        """Generate and execute multiple random plans"""
+        rospy.loginfo(f"Generating {num_plans} sample plans...")
 
-        move_group = self.env_loader.get_move_group()
-        joint_names = move_group.get_active_joints()
+        # Try to move to home position first
+        self.move_to_home()
+
+        # Get joint limits for random sampling
         robot = self.env_loader.get_robot()
+        joint_names = self.planner.move_group.get_active_joints()
 
         joint_limits = []
         for joint_name in joint_names:
             joint = robot.get_joint(joint_name)
             joint_limits.append((joint.min_bound(), joint.max_bound()))
 
-        # Get current joint values
-        current_joints = self.move_group.get_current_joint_values()
-        rospy.loginfo("Current joint values: %s", current_joints)
-
-        # Generate multiple plans
-        rospy.loginfo(f"Generating {num_plans} sample plans...")
+        # Track our progress
         successful_plans = 0
         attempts = 0
-        max_attempts = num_plans * 200
+        max_attempts = num_plans * 5  # Allow multiple attempts per desired plan
 
         while successful_plans < num_plans and attempts < max_attempts:
             attempts += 1
             try:
-                # Generate a random joint configuration within joint limits
-                new_joint_target = [
+                # Generate a random joint configuration within limits
+                import random
+
+                random_joints = [
                     random.uniform(min_limit, max_limit)
                     for min_limit, max_limit in joint_limits
                 ]
 
                 rospy.loginfo(
-                    f"Attempt {attempts}/{max_attempts} - Planning to joint target: %s",
-                    new_joint_target,
+                    f"Attempt {attempts}/{max_attempts} - Planning to random configuration"
                 )
-                self.move_group.set_joint_value_target(new_joint_target)
 
-                # Create a plan
-                rospy.loginfo(f"Attempt {attempts}/{max_attempts} - Planning...")
-                plan_success, plan, planning_time, error_code = self.move_group.plan()
+                # Plan to the random configuration
+                success, plan, planning_time, error_code = (
+                    self.planner.plan_to_joint_target(random_joints)
+                )
 
-                if plan_success and plan and len(plan.joint_trajectory.points) > 0:
+                if success and plan:
                     successful_plans += 1
                     rospy.loginfo(
-                        f"Plan {successful_plans}/{num_plans} - Planning successful with {len(plan.joint_trajectory.points)} waypoints."
+                        f"Plan {successful_plans}/{num_plans} successful, executing..."
                     )
 
                     # Execute the plan
-                    rospy.loginfo(f"Plan {successful_plans}/{num_plans} - Executing...")
-                    self.move_group.execute(plan, wait=True)
-                    rospy.loginfo(
-                        f"Plan {successful_plans}/{num_plans} - Motion execution complete."
+                    execution_success = self.executor.execute_plan(
+                        plan, verify_safety=True
                     )
 
-                    # Update current joints for next sample
-                    current_joints = self.move_group.get_current_joint_values()
+                    if execution_success:
+                        rospy.loginfo(
+                            f"Plan {successful_plans}/{num_plans} executed successfully"
+                        )
+                    else:
+                        rospy.logwarn(
+                            f"Plan {successful_plans}/{num_plans} execution failed"
+                        )
+                        successful_plans -= 1  # Don't count failed executions
 
-                    # Wait a short time between plans
+                    # Short pause between plans
                     time.sleep(1.0)
                 else:
-                    # Get and log the error description using our new error codes module
-                    error_name = get_error_code_name(error_code)
-                    error_description = get_error_description(error_code)
                     rospy.logwarn(
-                        f"Attempt {attempts}/{max_attempts} - Planning failed. Error: {error_name} - {error_description}"
+                        f"Attempt {attempts}/{max_attempts} - Planning failed"
                     )
 
-            except rospy.ServiceException as e:
-                rospy.logerr(
-                    f"Attempt {attempts}/{max_attempts} - Service call failed: {e}"
-                )
-                rospy.logerr(traceback.format_exc())
-
             except Exception as e:
-                rospy.logerr(f"Attempt {attempts}/{max_attempts} - Error: {e}")
+                rospy.logerr(f"Error during planning/execution: {str(e)}")
                 rospy.logerr(traceback.format_exc())
-
-            finally:
-                self.move_group.stop()
-                self.move_group.clear_pose_targets()
 
         if successful_plans < num_plans:
             rospy.logwarn(
-                f"Could only complete {successful_plans}/{num_plans} plans after {attempts} attempts"
+                f"Only completed {successful_plans}/{num_plans} plans after {attempts} attempts"
             )
+        else:
+            rospy.loginfo(
+                f"Successfully completed all {num_plans} plans in {attempts} attempts"
+            )
+
+        # Return to home position
+        self.move_to_home()
 
     def cleanup(self):
         """Clean up resources before shutting down"""
         rospy.loginfo("Cleaning up...")
         self.env_loader.clear_scene()
-        moveit_commander.roscpp_shutdown()
 
 
 def main():
@@ -234,7 +244,17 @@ def main():
     try:
         # Create robot mover and generate plans
         robot_mover = RobotMover()
-        robot_mover.generate_plans(num_plans=5)
+
+        # Check if specific named targets are available
+        if "all-zeros" in robot_mover.named_targets:
+            # Move to all-zeros named target
+            robot_mover.move_to_named_target("all-zeros")
+        else:
+            # Fall back to generic home
+            robot_mover.move_to_home()
+
+        # Generate and execute random plans
+        robot_mover.generate_plans(num_plans=3)
 
     except Exception as e:
         rospy.logerr(f"Error in main: {e}")
@@ -249,6 +269,3 @@ if __name__ == "__main__":
         main()
     except rospy.ROSInterruptException:
         pass
-    except Exception as e:
-        rospy.logerr(f"Unhandled exception: {e}")
-        rospy.logerr(traceback.format_exc())

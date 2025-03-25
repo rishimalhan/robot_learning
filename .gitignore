@@ -7,4 +7,4 @@ deps/
 devel/
 .catkin_tools/
 *.pyc
-*/__pycache__/
+__pycache__/

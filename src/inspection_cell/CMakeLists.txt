@@ -168,6 +168,8 @@ include_directories(
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   src/inspection_cell/load_system.py
+  src/inspection_cell/planner.py
+  src/inspection_cell/executor.py
   scripts/test_move_robot.py
   scripts/test_check_collision.py
   scripts/test_collision_checker.py
