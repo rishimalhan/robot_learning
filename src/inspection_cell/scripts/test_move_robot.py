@@ -131,7 +131,7 @@ class RobotMover:
 
         return is_valid
 
-    def generate_plans(self, num_plans=20):
+    def generate_plans(self, num_plans=5):
         """Generate and execute multiple plans"""
         # Check current state for collisions
         rospy.loginfo("Checking current state for collisions...")
@@ -154,9 +154,7 @@ class RobotMover:
         rospy.loginfo(f"Generating {num_plans} sample plans...")
         successful_plans = 0
         attempts = 0
-        max_attempts = (
-            num_plans * 2
-        )  # Try more times than needed to get enough successful plans
+        max_attempts = num_plans * 200
 
         while successful_plans < num_plans and attempts < max_attempts:
             attempts += 1

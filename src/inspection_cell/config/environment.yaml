@@ -20,9 +20,21 @@ objects:
   # Back wall
   back_wall:
     type: box
-    dimensions: [0.025, 5.0, 5.0]
+    dimensions: [0.025, 5.0, 2.0]
     pose:
-      position: [-0.6, 0.0, 2.5]
+      position: [-0.6, 0.0, 1.0]
+      orientation: [0.0, 0.0, 0.0]
+    color: [0.8, 0.8, 0.8]  # light gray
+    alpha: 0.0
+    collision_enabled: true
+    visible: true
+
+  # Ceiling
+  ceiling_wall:
+    type: box
+    dimensions: [4.0, 4.0, 0.025]
+    pose:
+      position: [1.0, 0.0, 2.0]
       orientation: [0.0, 0.0, 0.0]
     color: [0.8, 0.8, 0.8]  # light gray
     alpha: 0.0
@@ -34,11 +46,34 @@ objects:
     type: mesh
     mesh_path: "package://inspection_cell/assets/table.stl"
     pose:
-      position: [1.0, 0.0, 0.6]
+      position: [1.0, 0.0, 0.4]
       orientation: [1.57, 0.0, 1.57]
     color: [0.588, 0.588, 0.557]
     alpha: 1.0
     scale: [1.0, 0.7, 1.0]
+    collision_enabled: true
+    visible: true
+  
+  part:
+    # type: mesh
+    # mesh_path: "package://inspection_cell/assets/jet_engine_casing.stl"
+    # pose:
+    #   position: [1.0, 0.0, 1.5]
+    #   orientation: [0.0, -1.57, 0.0]
+    # color: [0.922, 0.918, 0.88]
+    # alpha: 1.0
+    # scale: [2, 2, 2]
+    # collision_enabled: true
+    # visible: true
+
+    type: mesh
+    mesh_path: "package://inspection_cell/assets/engine_casing_1.stl"
+    pose:
+      position: [0.8, -0.9, 0.4]
+      orientation: [1.57, 0.0, 1.57]
+    color: [0.922, 0.918, 0.88]
+    alpha: 1.0
+    scale: [1.5, 1.5, 1.5]
     collision_enabled: true
     visible: true
 
