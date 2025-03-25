@@ -173,6 +173,7 @@ catkin_install_python(PROGRAMS
   scripts/test_move_robot.py
   scripts/test_check_collision.py
   scripts/test_collision_checker.py
+  scripts/sample_roi_poses.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
