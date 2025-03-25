@@ -41,7 +41,7 @@ objects:
     collision_enabled: true
     visible: true
 
-  platform:
+  robot_roi:
     type: box
     dimensions: [0.8, 2.0, 0.7]
     pose:
