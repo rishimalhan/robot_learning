@@ -4,7 +4,7 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
-        - /MotionPlanning1
+        - /MotionPlanning1/Planning Metrics1
       Splitter Ratio: 0.5170649886131287
     Tree Height: 375
   - Class: rviz/Help
@@ -63,7 +63,7 @@ Visualization Manager:
           Z: 2
       Name: MotionPlanning
       Planned Path:
-        Color Enabled: false
+        Color Enabled: true
         Interrupt Display: false
         Links:
           All Links Enabled: true
@@ -112,22 +112,22 @@ Visualization Manager:
             Value: true
           tool0:
             Alpha: 1
-            Show Axes: false
-            Show Trail: false
+            Show Axes: true
+            Show Trail: true
         Loop Animation: false
         Robot Alpha: 0.5
-        Robot Color: 150; 50; 150
+        Robot Color: 170; 255; 0
         Show Robot Collision: false
-        Show Robot Visual: false
+        Show Robot Visual: true
         Show Trail: false
         State Display Time: 0.05 s
-        Trail Step Size: 1
+        Trail Step Size: 3
         Trajectory Topic: /move_group/display_planned_path
-        Use Sim Time: false
+        Use Sim Time: true
       Planning Metrics:
         Payload: 1
-        Show Joint Torques: false
-        Show Manipulability: false
+        Show Joint Torques: true
+        Show Manipulability: true
         Show Manipulability Index: false
         Show Weight Limit: false
         TextHeight: 0.07999999821186066
@@ -208,6 +208,22 @@ Visualization Manager:
         Show Robot Visual: true
       Value: true
       Velocity_Scaling_Factor: 0.1
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /pose_sampler/roi_markers
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /pose_sampler/visualization_markers
+      Name: MarkerArray
+      Namespaces:
+        pose_markers: true
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -224,7 +240,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/XYOrbit
-      Distance: 3.803410530090332
+      Distance: 3.3379476070404053
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -240,9 +256,9 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5097969770431519
+      Pitch: 0.2897968590259552
       Target Frame: base_link
-      Yaw: 5.659949779510498
+      Yaw: 5.519952774047852
     Saved: ~
 Window Geometry:
   Displays:

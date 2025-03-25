@@ -14,11 +14,12 @@ from inspection_cell.load_system import EnvironmentLoader
 from inspection_cell.planner import Planner
 from inspection_cell.executor import Executor
 
-from geometry_msgs.msg import Pose, Point, Quaternion, PoseStamped
+from geometry_msgs.msg import Pose, Point, Quaternion, PoseStamped, Vector3
 from std_msgs.msg import ColorRGBA
 from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.msg import DisplayTrajectory
 from moveit_msgs.msg import RobotState, PlanningScene, ObjectColor
+from visualization_msgs.msg import Marker, MarkerArray
 
 
 class PoseSampler:
@@ -26,10 +27,18 @@ class PoseSampler:
         # Initialize ROS node
         rospy.init_node("pose_sampler", anonymous=True)
 
+        # Initialize tracking sets for markers
+        self.marker_ids = set()
+        self.roi_marker_ids = set()
+
+        # Track sampled and successful poses
+        self.sampled_poses = []
+        self.successful_poses = []
+
         # Initialize the environment loader
         self.env_loader = self._create_environment()
 
-        # Create publishers for visualization (before getting ROI info)
+        # Create publishers for visualization
         self.pose_target_pub = rospy.Publisher(
             "/move_group/goal_pose", PoseStamped, queue_size=1
         )
@@ -39,17 +48,20 @@ class PoseSampler:
         self.display_trajectory_pub = rospy.Publisher(
             "/move_group/display_planned_path", DisplayTrajectory, queue_size=10
         )
+        # Add marker publishers for visualization without affecting collision checking
+        self.marker_pub = rospy.Publisher(
+            "/pose_sampler/visualization_markers", MarkerArray, queue_size=10
+        )
+        self.roi_markers_pub = rospy.Publisher(
+            "/pose_sampler/roi_markers", MarkerArray, queue_size=1
+        )
 
-        # Get the robot_roi information from the config (after publishers are set up)
+        # Get the robot_roi information from the config
         self.roi_info = self._get_roi_info()
 
         # Initialize the planner and executor
         self.planner = Planner(move_group_name="manipulator")
         self.executor = Executor(move_group_name="manipulator", check_collisions=True)
-
-        # Track sampled and successful poses
-        self.sampled_poses = []
-        self.successful_poses = []
 
         rospy.loginfo("PoseSampler initialized")
 
@@ -214,12 +226,9 @@ class PoseSampler:
         return roi_info
 
     def _visualize_roi_corners(self, roi_info):
-        """Visualize the corners of the ROI to confirm its position"""
+        """Visualize the corners of the ROI to confirm its position using visualization markers"""
         if not roi_info:
             return
-
-        planning_scene = PlanningScene()
-        planning_scene.is_diff = True
 
         dimensions = roi_info["dimensions"]
         position = roi_info["pose"]["position"]
@@ -228,9 +237,10 @@ class PoseSampler:
         half_dims = [d / 2 for d in dimensions]
         x, y, z = position
 
-        # Create markers for the 8 corners of the box
-        from moveit_msgs.msg import CollisionObject
+        # Create a marker array for the corners
+        marker_array = MarkerArray()
 
+        # Create markers for the 8 corners of the box
         for i, corner in enumerate(
             [
                 (
@@ -275,94 +285,132 @@ class PoseSampler:
                 ),  # bottom, back, left
             ]
         ):
-            # Create a collision object for the corner marker
-            marker = CollisionObject()
+            # Create a marker for this corner
+            marker = Marker()
             marker.header.frame_id = self.env_loader.planning_frame
-            marker.id = f"roi_corner_{i}"
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "roi_corners"
+            marker.id = i
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
 
-            # Create a tiny sphere at the corner position
-            primitive = SolidPrimitive()
-            primitive.type = SolidPrimitive.SPHERE
-            primitive.dimensions = [0.02]  # Very small sphere
+            # Set the marker pose
+            marker.pose.position.x = corner[0]
+            marker.pose.position.y = corner[1]
+            marker.pose.position.z = corner[2]
+            marker.pose.orientation.w = 1.0
 
-            pose = Pose()
-            pose.position.x = corner[0]
-            pose.position.y = corner[1]
-            pose.position.z = corner[2]
-            pose.orientation.w = 1.0
+            # Set the marker scale (size)
+            marker.scale = Vector3(0.02, 0.02, 0.02)  # Small sphere
 
-            marker.primitives.append(primitive)
-            marker.primitive_poses.append(pose)
-            marker.operation = CollisionObject.ADD
+            # Set the marker color (blue)
+            marker.color = ColorRGBA(0.0, 0.0, 1.0, 0.8)
 
-            # Add the marker to the planning scene
-            planning_scene.world.collision_objects.append(marker)
+            # Set marker lifetime (0 = forever)
+            marker.lifetime = rospy.Duration(0)
 
-            # Set the color (blue)
-            color = ObjectColor()
-            color.id = marker.id
-            color.color = ColorRGBA(0.0, 0.0, 1.0, 0.8)  # Blue
+            # Add the marker to the array
+            marker_array.markers.append(marker)
+            self.roi_marker_ids.add(i)
 
-            planning_scene.object_colors.append(color)
+        # Create edge lines between corners to better visualize the box
+        for i, (start_idx, end_idx) in enumerate(
+            [
+                (0, 1),
+                (1, 3),
+                (3, 2),
+                (2, 0),  # Top face
+                (4, 5),
+                (5, 7),
+                (7, 6),
+                (6, 4),  # Bottom face
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),  # Vertical edges
+            ]
+        ):
+            marker = Marker()
+            marker.header.frame_id = self.env_loader.planning_frame
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "roi_edges"
+            marker.id = i + 8  # Start after the corner IDs
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
 
-        # Publish the planning scene update
-        self.planning_scene_pub.publish(planning_scene)
-        rospy.loginfo("Visualized ROI corners as blue spheres")
+            # Add the points
+            p1 = marker_array.markers[start_idx].pose.position
+            p2 = marker_array.markers[end_idx].pose.position
+            marker.points = [p1, p2]
+
+            # Set the marker scale (width)
+            marker.scale.x = 0.005  # Line width
+
+            # Set the marker color (blue)
+            marker.color = ColorRGBA(0.0, 0.0, 1.0, 0.6)
+
+            # Set marker lifetime (0 = forever)
+            marker.lifetime = rospy.Duration(0)
+
+            # Add the marker to the array
+            marker_array.markers.append(marker)
+            self.roi_marker_ids.add(i + 8)
+
+        # Publish the marker array
+        self.roi_markers_pub.publish(marker_array)
+        rospy.loginfo("Visualized ROI corners and edges as blue markers")
 
     def visualize_pose(self, pose, successful=None):
-        """Visualize a pose using MoveIt's target display in RViz
+        """Visualize a pose using MoveIt's target display in RViz and optional success/failure marker
 
         Args:
             pose: The pose to visualize
-            successful: Whether the pose was successfully reached
+            successful: Whether the pose was successfully reached (None if not yet determined)
         """
-        # Create a stamped pose for visualization
+        # Create a stamped pose for MoveIt visualization
         stamped_pose = PoseStamped()
         stamped_pose.header.frame_id = self.env_loader.planning_frame
         stamped_pose.header.stamp = rospy.Time.now()
         stamped_pose.pose = pose
 
-        # Publish the pose to show in RViz
+        # Publish the pose target to show in RViz
         self.pose_target_pub.publish(stamped_pose)
 
-        # If we want to color-code based on success, we can create small markers
-        # in the planning scene with different colors
+        # If we want to color-code based on success, create a visual marker
         if successful is not None:
-            # Create a planning scene to add a visual marker
-            planning_scene = PlanningScene()
-            planning_scene.is_diff = True
-
-            # Create a collision object for the marker
-            from moveit_msgs.msg import CollisionObject
-
-            marker = CollisionObject()
+            # Create a marker for the result
+            marker = Marker()
             marker.header.frame_id = self.env_loader.planning_frame
-            marker.id = f"pose_marker_{len(self.sampled_poses)}"
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "pose_markers"
+            marker.id = len(self.sampled_poses)
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
 
-            # Create a small sphere at the pose position
-            primitive = SolidPrimitive()
-            primitive.type = SolidPrimitive.SPHERE
-            primitive.dimensions = [0.025]  # Small sphere
+            # Set the marker pose
+            marker.pose = pose
 
-            marker.primitives.append(primitive)
-            marker.primitive_poses.append(pose)
-            marker.operation = CollisionObject.ADD
+            # Set the marker scale (size)
+            marker.scale = Vector3(0.025, 0.025, 0.025)  # Small sphere
 
-            # Add the marker to the planning scene
-            planning_scene.world.collision_objects.append(marker)
-
-            # Set the color based on success
-            color = ObjectColor()
-            color.id = marker.id
+            # Set the marker color based on success
             if successful:
-                color.color = ColorRGBA(0.0, 1.0, 0.0, 0.7)  # Green
+                marker.color = ColorRGBA(0.0, 1.0, 0.0, 0.7)  # Green
             else:
-                color.color = ColorRGBA(1.0, 0.0, 0.0, 0.7)  # Red
+                marker.color = ColorRGBA(1.0, 0.0, 0.0, 0.7)  # Red
 
-            planning_scene.object_colors.append(color)
+            # Set marker lifetime (0 = forever)
+            marker.lifetime = rospy.Duration(0)
 
-            # Publish the planning scene update
-            self.planning_scene_pub.publish(planning_scene)
+            # Track the marker ID
+            self.marker_ids.add(marker.id)
+
+            # Create a marker array with just this marker
+            marker_array = MarkerArray()
+            marker_array.markers.append(marker)
+
+            # Publish the marker
+            self.marker_pub.publish(marker_array)
 
     def visualize_trajectory(self, plan):
         """Visualize a planned trajectory in RViz"""
@@ -389,6 +437,7 @@ class PoseSampler:
                 'vertical' - tool pointing mostly downward
                 'horizontal' - tool pointing mostly horizontally
                 'look_at_center' - tool pointing toward the center of the ROI
+                'downward' - tool Z axis pointing downward within 30 degrees
 
         Returns:
             geometry_msgs/Pose or None if sampling failed
@@ -471,6 +520,46 @@ class PoseSampler:
 
             # Roll can be random or fixed
             roll = random.uniform(-math.pi / 6, math.pi / 6)
+
+        elif orientation_strategy == "downward":
+            # Tool Z axis pointing downward with maximum 30 degree deviation
+            # This means tool Z axis should be roughly aligned with world -Z axis
+
+            # Convert 30 degrees to radians
+            max_deviation = math.radians(30.0)
+
+            # Start with a reference orientation where Z is pointing down (pitch = pi)
+            # Then apply small random deviations within the 30 degree cone
+
+            # Random deviation angles (spherical coordinates)
+            # Theta is the deviation from straight down, limited to 30 degrees
+            theta = random.uniform(0, max_deviation)
+            # Phi is the direction of deviation (360 degrees possible)
+            phi = random.uniform(0, 2 * math.pi)
+
+            # Convert deviation angles to a direction vector
+            # Note: When theta=0, this points straight down (-Z)
+            dx = math.sin(theta) * math.cos(phi)
+            dy = math.sin(theta) * math.sin(phi)
+            dz = -math.cos(theta)  # Negative because we want to point down
+
+            # Convert this direction vector to euler angles
+            # For a Z-down orientation, we need pitch around Y axis to be approximately pi/2
+            pitch = math.pi / 2 + math.asin(
+                dz
+            )  # offset by pi/2 because of reference orientation
+
+            # Yaw (around Z) is determined by the X,Y components
+            yaw = math.atan2(dy, dx)
+
+            # Roll around new Z axis can be random
+            # For a more stable grasp orientation, we could fix this
+            roll = random.uniform(-math.pi, math.pi)
+
+            rospy.loginfo(
+                f"Downward orientation: theta={math.degrees(theta):.1f}°, "
+                + f"deviation from vertical: {math.degrees(theta):.1f}°"
+            )
 
         else:
             rospy.logwarn(
@@ -581,12 +670,13 @@ class PoseSampler:
             num_poses: Number of successful poses to collect
             max_attempts: Maximum number of sampling attempts
             orientation_strategies: List of orientation strategies to cycle through
-                If None, uses ['random', 'vertical', 'horizontal', 'look_at_center']
+                If None, uses ['downward', 'vertical', 'random', 'horizontal', 'look_at_center']
         """
         if orientation_strategies is None:
             orientation_strategies = [
-                "random",
+                "downward",  # Add the new downward strategy as default
                 "vertical",
+                "random",
                 "horizontal",
                 "look_at_center",
             ]
@@ -664,38 +754,58 @@ class PoseSampler:
         """Clean up resources before shutting down"""
         rospy.loginfo("Cleaning up...")
 
-        # Clear any visualization markers from the scene
-        planning_scene = PlanningScene()
-        planning_scene.is_diff = True
+        # Clear any visualization markers we've created
+        if self.marker_ids or self.roi_marker_ids:
+            # Create marker arrays for deletion
+            pose_markers = MarkerArray()
+            roi_markers = MarkerArray()
 
-        # For each sampled pose, try to remove the marker
-        for i in range(len(self.sampled_poses)):
-            # Create a removal operation for the marker
-            from moveit_msgs.msg import CollisionObject
+            # Create deletion markers for pose markers
+            for marker_id in self.marker_ids:
+                marker = Marker()
+                marker.header.frame_id = self.env_loader.planning_frame
+                marker.header.stamp = rospy.Time.now()
+                marker.ns = "pose_markers"
+                marker.id = marker_id
+                marker.action = Marker.DELETE
+                pose_markers.markers.append(marker)
 
-            marker = CollisionObject()
-            marker.header.frame_id = self.env_loader.planning_frame
-            marker.id = f"pose_marker_{i}"
-            marker.operation = CollisionObject.REMOVE
+            # Create deletion markers for ROI markers
+            for marker_id in self.roi_marker_ids:
+                # Delete corner markers
+                corner_marker = Marker()
+                corner_marker.header.frame_id = self.env_loader.planning_frame
+                corner_marker.header.stamp = rospy.Time.now()
+                corner_marker.ns = "roi_corners"
+                corner_marker.id = marker_id
+                corner_marker.action = Marker.DELETE
+                roi_markers.markers.append(corner_marker)
 
-            planning_scene.world.collision_objects.append(marker)
+                # Delete edge markers
+                if marker_id >= 8:  # IDs 8-19 are edge markers
+                    edge_marker = Marker()
+                    edge_marker.header.frame_id = self.env_loader.planning_frame
+                    edge_marker.header.stamp = rospy.Time.now()
+                    edge_marker.ns = "roi_edges"
+                    edge_marker.id = marker_id
+                    edge_marker.action = Marker.DELETE
+                    roi_markers.markers.append(edge_marker)
 
-        # Remove the ROI corner markers
-        for i in range(8):  # 8 corners
-            marker = CollisionObject()
-            marker.header.frame_id = self.env_loader.planning_frame
-            marker.id = f"roi_corner_{i}"
-            marker.operation = CollisionObject.REMOVE
+            # Publish the deletion markers
+            if pose_markers.markers:
+                self.marker_pub.publish(pose_markers)
+                rospy.loginfo(
+                    f"Cleared {len(pose_markers.markers)} pose visualization markers"
+                )
 
-            planning_scene.world.collision_objects.append(marker)
+            if roi_markers.markers:
+                self.roi_markers_pub.publish(roi_markers)
+                rospy.loginfo(
+                    f"Cleared {len(roi_markers.markers)} ROI visualization markers"
+                )
 
-        # Publish the planning scene update if we have any markers to remove
-        if self.sampled_poses or True:  # Always attempt to remove ROI corners
-            self.planning_scene_pub.publish(planning_scene)
-            rospy.loginfo(
-                f"Cleared {len(self.sampled_poses)} pose markers and 8 ROI corner markers"
-            )
-            rospy.sleep(0.5)  # Allow time for removal
+            # Allow time for deletion to process
+            rospy.sleep(0.5)
 
     def set_roi_position(self, position_value=None):
         """
@@ -751,7 +861,7 @@ def main():
             "--strategies",
             type=str,
             default=None,
-            help="Comma-separated list of orientation strategies: random,vertical,horizontal,look_at_center",
+            help="Comma-separated list of orientation strategies: random,vertical,horizontal,look_at_center,downward",
         )
         parser.add_argument(
             "--roi-position",
@@ -767,7 +877,13 @@ def main():
         if args.strategies:
             strategies = args.strategies.split(",")
             # Validate strategies
-            valid_strategies = ["random", "vertical", "horizontal", "look_at_center"]
+            valid_strategies = [
+                "random",
+                "vertical",
+                "horizontal",
+                "look_at_center",
+                "downward",
+            ]
             for s in strategies:
                 if s not in valid_strategies:
                     rospy.logwarn(
