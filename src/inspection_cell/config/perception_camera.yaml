@@ -1,0 +1,29 @@
+camera:
+  # Camera frame configuration
+  frame:
+    reference_frame: "tool0"  # The frame the camera is mounted on. Can be "tool0", "base_link", etc.
+    transform:
+      position: [0.0, 0.0, 0.05]  # x, y, z offset from reference frame in meters
+      orientation: [0.0, 0.0, 0.0]  # roll, pitch, yaw in radians
+
+  # Field of view configuration
+  field_of_view:
+    type: "frustum"  # "frustum" for pyramid-like FOV, "cone" for conical FOV
+    horizontal_fov: 60.0  # Horizontal field of view in degrees
+    vertical_fov: 45.0    # Vertical field of view in degrees
+    min_range: 0.1        # Minimum sensing range in meters
+    max_range: 2.0        # Maximum sensing range in meters
+  
+  # Sensing properties
+  sensing:
+    publish_rgb: true      # Whether to publish simulated RGB data
+    publish_depth: true    # Whether to publish simulated depth data
+    publish_point_cloud: true  # Whether to publish simulated point cloud
+    noise_level: 0.005     # Standard deviation of noise to add to depth measurements in meters
+    frame_rate: 30         # Simulated frame rate for publishing data
+
+  # Visualization options
+  visualization:
+    show_camera_frame: true      # Show the camera coordinate frame in RViz
+    show_frustum: true           # Show the camera frustum/FOV in RViz
+    frustum_color: [0.0, 0.7, 1.0, 0.3]  # RGBA color for the frustum 
