@@ -101,7 +101,7 @@ class RobotMover:
             )
 
             # Execute the plan
-            execution_success = self.executor.execute_plan(plan, verify_safety=True)
+            execution_success = self.executor.execute_plan(plan)
 
             if execution_success:
                 rospy.loginfo("Successfully moved to home position")

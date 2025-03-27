@@ -125,27 +125,14 @@ class Planner:
     def plan_to_home(self):
         """
         Plan a motion to the home position.
-        First tries using the 'all-zeros' named target if available,
+        First tries using the 'home' named target if available,
         otherwise falls back to a predefined joint position.
 
         Returns:
             tuple: (success, plan, planning_time, error_code)
         """
         rospy.loginfo("Planning to home position...")
-
-        # Try to use the named target first
-        named_targets = self.move_group.get_named_targets()
-
-        if "all-zeros" in named_targets:
-            rospy.loginfo("Using 'all-zeros' named target from SRDF")
-            return self.plan_to_named_target("all-zeros")
-        else:
-            rospy.loginfo(
-                "Named target 'all-zeros' not found, using hardcoded home position"
-            )
-            # Define a safe home position slightly above the work surface
-            home_position = [0, -0.5, 0, 0, 0.5, 0]  # Adjust as needed
-            return self.plan_to_joint_target(home_position)
+        return self.plan_to_named_target("home")
 
     def plan_to_joint_target(self, joint_positions):
         """
@@ -239,6 +226,99 @@ class Planner:
             rospy.logwarn(f"Cartesian planning only achieved {fraction:.2%} completion")
 
         return plan, fraction, planning_time
+
+    def plan_to_ee_offset(
+        self, direction, distance, eef_step=0.01, avoid_collisions=True
+    ):
+        """
+        Plan a linear motion from current end effector position along the specified direction.
+        The direction is specified in the end-effector frame.
+
+        Args:
+            direction: 3D vector [x, y, z] indicating the direction of motion in the end-effector frame
+            distance: Distance to move in meters
+            eef_step: Step size for the end effector (meters)
+            avoid_collisions: Whether to avoid collisions during planning
+
+        Returns:
+            tuple: (success, plan, planning_time, error_code)
+        """
+        # Normalize the direction vector
+        direction = np.array(direction, dtype=float)
+        norm = np.linalg.norm(direction)
+        if norm < 1e-6:
+            rospy.logerr("Direction vector is too small to normalize")
+            return False, None, 0.0, 0
+
+        unit_direction = direction / norm
+        rospy.loginfo(
+            f"Planning linear motion in end-effector frame direction {unit_direction} for {distance} meters"
+        )
+
+        # Get current end effector pose
+        current_pose = self.move_group.get_current_pose().pose
+
+        # Extract the rotation part from the current pose (as quaternion)
+        qx = current_pose.orientation.x
+        qy = current_pose.orientation.y
+        qz = current_pose.orientation.z
+        qw = current_pose.orientation.w
+
+        # Convert the direction from end-effector frame to world frame
+        # Using quaternion rotation formula: p' = q * p * q^-1
+        # For simplicity, using a less computationally intensive formula for rotating a vector by a quaternion
+
+        # Compute the rotated direction (end-effector frame to world frame)
+        # Formula: v' = v + 2*s*(q×v) + 2*(q×(q×v))
+        # where q = [qx, qy, qz] (vector part) and s = qw (scalar part)
+        q_vec = np.array([qx, qy, qz])
+        s = qw
+
+        # First cross product: q × v
+        cross1 = np.cross(q_vec, unit_direction)
+
+        # Second cross product: q × (q × v)
+        cross2 = np.cross(q_vec, cross1)
+
+        # Rotated vector from end-effector frame to world frame
+        world_direction = unit_direction + 2 * s * cross1 + 2 * cross2
+
+        # Normalize again to ensure unit length
+        world_direction = world_direction / np.linalg.norm(world_direction)
+
+        rospy.loginfo(f"Converted to world frame direction: {world_direction}")
+
+        # Create target pose by applying the offset in world frame
+        target_pose = current_pose
+        target_pose.position.x += world_direction[0] * distance
+        target_pose.position.y += world_direction[1] * distance
+        target_pose.position.z += world_direction[2] * distance
+
+        # Create waypoints for cartesian path
+        waypoints = [target_pose]  # Only include the target pose, not the current one
+
+        # Plan the cartesian path
+        start_time = rospy.Time.now()
+        plan, fraction = self.move_group.compute_cartesian_path(
+            waypoints, eef_step, avoid_collisions
+        )
+        planning_time = (rospy.Time.now() - start_time).to_sec()
+
+        # Determine success based on the fraction of path achieved
+        success = fraction > 0.98  # Consider 98% or better as success
+        error_code = 0  # We don't have an actual error code from cartesian planning
+
+        # Log the planning result
+        if success:
+            rospy.loginfo(
+                f"Linear motion planning succeeded with {fraction:.2%} completion in {planning_time:.2f} seconds"
+            )
+        else:
+            rospy.logwarn(
+                f"Linear motion planning only achieved {fraction:.2%} completion"
+            )
+
+        return success, plan, planning_time, error_code
 
 
 if __name__ == "__main__":

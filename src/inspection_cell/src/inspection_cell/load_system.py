@@ -29,7 +29,11 @@ from inspection_cell.collision_checker import CollisionCheck
 
 class EnvironmentLoader:
     def __init__(self, move_group_name="manipulator", clear_scene=True):
-        rospy.init_node("environment_loader", anonymous=True)
+        # Initialize ROS node only if it hasn't been already
+        if not rospy.core.is_initialized():
+            rospy.init_node("environment_loader", anonymous=True)
+        else:
+            rospy.loginfo("Using existing ROS node")
 
         self.scene = PlanningSceneInterface()
         self.move_group = MoveGroupCommander(move_group_name)

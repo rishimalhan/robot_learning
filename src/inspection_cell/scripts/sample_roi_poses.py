@@ -608,7 +608,7 @@ class PoseSampler:
             rospy.sleep(0.5)
 
             # Execute the plan
-            execution_success = self.executor.execute_plan(plan, verify_safety=True)
+            execution_success = self.executor.execute_plan(plan)
 
             if execution_success:
                 rospy.loginfo("Successfully moved to pose")
@@ -648,7 +648,7 @@ class PoseSampler:
             self.visualize_trajectory(plan)
 
             # Execute the plan
-            execution_success = self.executor.execute_plan(plan, verify_safety=True)
+            execution_success = self.executor.execute_plan(plan)
 
             if execution_success:
                 rospy.loginfo("Successfully moved to home position")

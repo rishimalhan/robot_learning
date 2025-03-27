@@ -6,223 +6,293 @@ import numpy as np
 import os
 import rospkg
 import tf2_ros
-import tf.transformations
-from geometry_msgs.msg import (
-    TransformStamped,
-    PoseStamped,
-    Pose,
-    Point,
-    Quaternion,
-    Vector3,
-)
+import tf
+from geometry_msgs.msg import TransformStamped, Point, Pose, Vector3, Quaternion
 from visualization_msgs.msg import Marker, MarkerArray
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 import sensor_msgs.point_cloud2 as pc2
 from std_msgs.msg import Header, ColorRGBA
 import cv2
 from cv_bridge import CvBridge
-import random
+import trimesh
 import math
+
+
+# Add this custom frustum creation function since trimesh.creation doesn't have frustum
+def create_frustum(fovy, aspect, near, far):
+    """
+    Create a frustum mesh.
+
+    Parameters:
+    -----------
+    fovy : float
+        Vertical field of view in radians
+    aspect : float
+        Aspect ratio width/height
+    near : float
+        Near plane distance
+    far : float
+        Far plane distance
+
+    Returns:
+    --------
+    frustum : trimesh.Trimesh
+        A mesh representing the frustum
+    """
+    # Calculate dimensions at near and far planes
+    near_height = 2 * near * math.tan(fovy / 2)
+    near_width = near_height * aspect
+    far_height = 2 * far * math.tan(fovy / 2)
+    far_width = far_height * aspect
+
+    # Define vertices
+    vertices = np.array(
+        [
+            # Near plane (z = near)
+            [-near_width / 2, -near_height / 2, near],  # 0: near bottom left
+            [near_width / 2, -near_height / 2, near],  # 1: near bottom right
+            [near_width / 2, near_height / 2, near],  # 2: near top right
+            [-near_width / 2, near_height / 2, near],  # 3: near top left
+            # Far plane (z = far)
+            [-far_width / 2, -far_height / 2, far],  # 4: far bottom left
+            [far_width / 2, -far_height / 2, far],  # 5: far bottom right
+            [far_width / 2, far_height / 2, far],  # 6: far top right
+            [-far_width / 2, far_height / 2, far],  # 7: far top left
+        ]
+    )
+
+    # Define faces using triangles
+    faces = np.array(
+        [
+            # Near plane
+            [0, 1, 2],
+            [0, 2, 3],
+            # Far plane
+            [4, 6, 5],
+            [4, 7, 6],
+            # Connect near to far, side planes
+            [0, 3, 7],
+            [0, 7, 4],  # Left
+            [1, 5, 6],
+            [1, 6, 2],  # Right
+            [3, 2, 6],
+            [3, 6, 7],  # Top
+            [0, 4, 5],
+            [0, 5, 1],  # Bottom
+        ]
+    )
+
+    return trimesh.Trimesh(vertices=vertices, faces=faces)
 
 
 class SimulatedPerception:
     """
-    Simulated perception system that detects objects within a camera's field of view and a perception ROI.
+    Camera RGB-D detection system focused on detecting a part object.
 
-    This class simulates a camera mounted on the robot's tool frame, and detects objects
-    within both the camera's field of view and a perception ROI defined in the environment.
+    This class creates a virtual camera attached to the robot's tool frame
+    and publishes RGB-D images, point clouds, and camera info.
     """
 
     def __init__(self):
-        """Initialize the simulated perception system."""
+        """Initialize the RGB-D detection system."""
         rospy.loginfo("Initializing SimulatedPerception...")
 
         # Initialize ROS node if it hasn't been initialized already
         if not rospy.core.is_initialized():
             rospy.init_node("simulated_perception", anonymous=True)
 
-        # Create RosPack instance to get paths
+        # Get RosPack for file paths
         self.rospack = rospkg.RosPack()
 
         # Load camera configuration
         self._load_camera_config()
 
-        # Initialize TF listener for transformations
+        # Initialize TF listener
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
-        # Create publishers for visualization and simulated sensor data
+        # Create publishers for visualization and camera outputs
         self._create_publishers()
 
-        # Initialize OpenCV bridge for image conversions
+        # Initialize bridge for image conversion
         self.cv_bridge = CvBridge()
 
-        # Get planning scene interface to access objects
+        # Initialize part mesh and visibility state
+        self.part_mesh = None
+        self.is_visible = False
+        self.visibility_percentage = 0.0
+
+        # Flag to track whether boolean operations should be attempted
+        self.use_boolean_operations = True
+
+        # Get the part from the planning scene
         self._get_planning_scene_interface()
+        self._load_part_mesh()
 
-        # Initialize the perception ROI information
-        self._get_perception_roi_info()
-
-        # Timer for continuous perception updates
-        self.perception_rate = rospy.Rate(self.camera_config["sensing"]["frame_rate"])
-        self.perception_timer = rospy.Timer(
-            rospy.Duration(1.0 / self.camera_config["sensing"]["frame_rate"]),
-            self._perception_callback,
+        # Set up update timer
+        update_rate = 10.0  # Hz
+        self.update_timer = rospy.Timer(
+            rospy.Duration(1.0 / update_rate), self._update_callback
         )
 
-        rospy.loginfo("SimulatedPerception initialized")
+        rospy.loginfo("FrustumDetection initialized")
 
     def _load_camera_config(self):
         """Load camera configuration from YAML file."""
         config_path = os.path.join(
             self.rospack.get_path("inspection_cell"), "config", "perception_camera.yaml"
         )
-        rospy.loginfo(f"Loading camera configuration from: {config_path}")
 
         try:
             with open(config_path, "r") as f:
-                self.camera_config = yaml.safe_load(f)["camera"]
+                self.config = yaml.safe_load(f)["camera"]
             rospy.loginfo("Camera configuration loaded successfully")
         except Exception as e:
-            rospy.logerr(f"Failed to load camera configuration: {str(e)}")
+            rospy.logerr(f"Failed to load camera config: {str(e)}")
             # Set default configuration
-            self.camera_config = {
+            self.config = {
                 "frame": {
                     "reference_frame": "tool0",
                     "transform": {
-                        "position": [0.0, 0.0, 0.05],
-                        "orientation": [0.0, 0.0, 0.0],
+                        "position": [0.0, 0.0, 0.1],  # 10cm forward from tool0
+                        "orientation": [0.0, 0.0, 0.0],  # Z aligned with tool0
                     },
                 },
                 "field_of_view": {
-                    "type": "frustum",
                     "horizontal_fov": 60.0,
                     "vertical_fov": 45.0,
                     "min_range": 0.1,
                     "max_range": 2.0,
                 },
-                "sensing": {
-                    "publish_rgb": True,
-                    "publish_depth": True,
-                    "publish_point_cloud": True,
-                    "noise_level": 0.005,
-                    "frame_rate": 30,
-                },
                 "visualization": {
                     "show_camera_frame": True,
                     "show_frustum": True,
                     "frustum_color": [0.0, 0.7, 1.0, 0.3],
+                    "show_intersection": True,
                 },
             }
-            rospy.logwarn("Using default camera configuration")
 
     def _create_publishers(self):
-        """Create publishers for visualization and simulated sensor data."""
-        # Publishers for simulated sensor data
-        if self.camera_config["sensing"]["publish_rgb"]:
-            self.rgb_pub = rospy.Publisher(
-                "/camera/color/image_raw", Image, queue_size=1
-            )
-
-        if self.camera_config["sensing"]["publish_depth"]:
-            self.depth_pub = rospy.Publisher(
-                "/camera/depth/image_raw", Image, queue_size=1
-            )
-
-        if self.camera_config["sensing"]["publish_point_cloud"]:
-            self.pointcloud_pub = rospy.Publisher(
-                "/camera/depth/points", PointCloud2, queue_size=1
-            )
-
-        # Camera info publisher
+        """Create publishers for visualization and camera outputs."""
+        # Standard camera output topics
+        self.rgb_pub = rospy.Publisher("/camera/color/image_raw", Image, queue_size=1)
+        self.depth_pub = rospy.Publisher("/camera/depth/image_raw", Image, queue_size=1)
+        self.pointcloud_pub = rospy.Publisher(
+            "/camera/depth/points", PointCloud2, queue_size=1
+        )
         self.camera_info_pub = rospy.Publisher(
             "/camera/camera_info", CameraInfo, queue_size=1
         )
 
-        # Visualization publishers
+        # Visualization topics
         self.camera_frame_pub = rospy.Publisher(
-            "/simulated_perception/camera_frame", MarkerArray, queue_size=1
+            "/frustum_detection/camera_frame", Marker, queue_size=1
         )
         self.frustum_pub = rospy.Publisher(
-            "/simulated_perception/frustum", Marker, queue_size=1
+            "/frustum_detection/frustum", Marker, queue_size=1
         )
-        self.detected_objects_pub = rospy.Publisher(
-            "/simulated_perception/detected_objects", MarkerArray, queue_size=1
+        self.intersection_pub = rospy.Publisher(
+            "/frustum_detection/intersection", Marker, queue_size=1
         )
+        self.part_pub = rospy.Publisher("/frustum_detection/part", Marker, queue_size=1)
 
     def _get_planning_scene_interface(self):
-        """Initialize planning scene interface to access objects."""
+        """Get interface to the planning scene."""
         try:
             from moveit_commander import PlanningSceneInterface
 
             self.scene = PlanningSceneInterface()
             rospy.loginfo("Connected to MoveIt planning scene")
         except Exception as e:
-            rospy.logerr(f"Failed to connect to MoveIt planning scene: {str(e)}")
+            rospy.logerr(f"Failed to connect to planning scene: {str(e)}")
             self.scene = None
 
-    def _get_perception_roi_info(self):
-        """Get information about the perception ROI from the planning scene."""
+    def _load_part_mesh(self):
+        """Load the part mesh from the planning scene."""
         if not self.scene:
-            rospy.logerr(
-                "Planning scene interface not available, cannot get perception ROI info"
-            )
+            rospy.logerr("No planning scene interface available")
             return
 
-        # Wait for the scene to be fully loaded
+        # Wait for planning scene to be populated
         rospy.sleep(1.0)
 
-        # Get all collision objects from the scene
+        # Get objects from the scene
         scene_objects = self.scene.get_objects()
 
-        # Check if perception_roi exists in the scene
-        if "perception_roi" not in scene_objects:
-            rospy.logerr("perception_roi not found in planning scene objects")
-            self.perception_roi = None
+        # Look for the part object
+        if "part" not in scene_objects:
+            rospy.logwarn("Part object not found in planning scene")
             return
 
-        # Extract perception ROI information
-        roi_object = scene_objects["perception_roi"]
-        self.perception_roi = roi_object
-        rospy.loginfo("Retrieved perception ROI from planning scene")
+        # Get the mesh file for the part
+        # For this example, we'll create a simple box mesh
+        # In practice, you would load the actual mesh from the STL file
+        extents = (0.1, 0.1, 0.1)  # 10cm box
+        self.part_mesh = trimesh.creation.box(extents)
 
-    def _perception_callback(self, event=None):
-        """Periodic callback for perception updates."""
+        # Position the mesh based on the planning scene object
+        part_pose = (
+            scene_objects["part"].primitive_poses[0]
+            if scene_objects["part"].primitive_poses
+            else Pose()
+        )
+        translation = [part_pose.position.x, part_pose.position.y, part_pose.position.z]
+
+        # Apply the translation to the mesh
+        self.part_mesh.apply_translation(translation)
+
+        rospy.loginfo(f"Part mesh loaded and positioned at {translation}")
+
+        # Visualize the part
+        self._visualize_part()
+
+    def _update_callback(self, event=None):
+        """Timer callback to update camera pose and check visibility."""
         # Update camera pose
         if not self._update_camera_pose():
             return
 
-        # Visualize camera and its field of view
-        self._visualize_camera()
+        # Visualize camera and frustum
+        self._visualize_camera_frame()
+        self._visualize_frustum()
 
-        # Get objects in the scene
-        detected_objects = self._detect_objects()
+        # Check if part is visible in the frustum
+        self._check_part_visibility()
 
-        # Visualize detected objects
-        self._visualize_detected_objects(detected_objects)
-
-        # Generate and publish simulated sensor data
-        self._publish_simulated_data(detected_objects)
+        # Generate and publish camera outputs
+        self._publish_camera_data()
 
     def _update_camera_pose(self):
-        """Update the current camera pose based on the robot's position."""
+        """Update the camera pose based on the current tool position."""
         try:
-            # Get the transform from base_link to the reference frame (e.g., tool0)
-            ref_frame = self.camera_config["frame"]["reference_frame"]
+            # Get the transform from base_link to the reference frame (tool0)
             transform = self.tf_buffer.lookup_transform(
-                "base_link", ref_frame, rospy.Time(0), rospy.Duration(1.0)
+                "base_link",
+                self.config["frame"]["reference_frame"],
+                rospy.Time(0),
+                rospy.Duration(1.0),
             )
 
-            # Apply the camera offset from the reference frame
-            camera_offset = self.camera_config["frame"]["transform"]["position"]
-            camera_orientation = self.camera_config["frame"]["transform"]["orientation"]
+            # Store transform for later use
+            self.camera_transform = transform
 
-            # Store camera pose
-            self.camera_pose = transform
+            # Extract position and orientation
+            self.camera_pos = np.array(
+                [
+                    transform.transform.translation.x,
+                    transform.transform.translation.y,
+                    transform.transform.translation.z,
+                ]
+            )
 
-            # Store camera offset and orientation for later use
-            self.camera_offset = camera_offset
-            self.camera_orientation = camera_orientation
+            self.camera_rot = np.array(
+                [
+                    transform.transform.rotation.x,
+                    transform.transform.rotation.y,
+                    transform.transform.rotation.z,
+                    transform.transform.rotation.w,
+                ]
+            )
 
             return True
         except (
@@ -233,538 +303,560 @@ class SimulatedPerception:
             rospy.logwarn(f"TF lookup failed: {str(e)}")
             return False
 
-    def _visualize_camera(self):
-        """Visualize the camera frame and its field of view."""
-        if self.camera_config["visualization"]["show_camera_frame"]:
-            self._visualize_camera_frame()
-
-        if self.camera_config["visualization"]["show_frustum"]:
-            self._visualize_camera_frustum()
-
     def _visualize_camera_frame(self):
         """Visualize the camera coordinate frame."""
-        marker_array = MarkerArray()
-
-        # Create markers for the coordinate axes
-        for i, (axis, color) in enumerate(
-            zip(["x", "y", "z"], [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]])
-        ):
-            # Create axis marker
-            marker = Marker()
-            marker.header.frame_id = self.camera_config["frame"]["reference_frame"]
-            marker.header.stamp = rospy.Time.now()
-            marker.ns = "camera_frame"
-            marker.id = i
-            marker.type = Marker.ARROW
-            marker.action = Marker.ADD
-
-            # Set marker scale (arrow dimensions)
-            marker.scale.x = 0.05  # Shaft diameter
-            marker.scale.y = 0.08  # Head diameter
-            marker.scale.z = 0.05  # Head length
-
-            # Set marker color
-            marker.color.r = color[0]
-            marker.color.g = color[1]
-            marker.color.b = color[2]
-            marker.color.a = color[3]
-
-            # Set marker position (origin of the camera frame)
-            marker.pose.position.x = self.camera_offset[0]
-            marker.pose.position.y = self.camera_offset[1]
-            marker.pose.position.z = self.camera_offset[2]
-
-            # Set marker orientation
-            if axis == "x":
-                # X-axis: point along x
-                rpy = [0, 0, 0]
-                if self.camera_orientation[0] != 0:
-                    rpy[0] += self.camera_orientation[0]
-            elif axis == "y":
-                # Y-axis: point along y
-                rpy = [0, 0, math.pi / 2]
-                if self.camera_orientation[1] != 0:
-                    rpy[1] += self.camera_orientation[1]
-            else:  # z
-                # Z-axis: point along z
-                rpy = [0, math.pi / 2, 0]
-                if self.camera_orientation[2] != 0:
-                    rpy[2] += self.camera_orientation[2]
-
-            q = tf.transformations.quaternion_from_euler(rpy[0], rpy[1], rpy[2])
-            marker.pose.orientation.x = q[0]
-            marker.pose.orientation.y = q[1]
-            marker.pose.orientation.z = q[2]
-            marker.pose.orientation.w = q[3]
-
-            # Add to marker array
-            marker_array.markers.append(marker)
-
-        # Publish the marker array
-        self.camera_frame_pub.publish(marker_array)
-
-    def _visualize_camera_frustum(self):
-        """Visualize the camera field of view as a frustum."""
-        # Create a marker for the camera frustum
         marker = Marker()
-        marker.header.frame_id = self.camera_config["frame"]["reference_frame"]
+        marker.header.frame_id = self.config["frame"]["reference_frame"]
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "camera_frame"
+        marker.id = 0
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+
+        # Arrow pointing in the Z direction (camera's viewing direction)
+        marker.scale.x = 0.01  # Shaft diameter
+        marker.scale.y = 0.02  # Head diameter
+        marker.scale.z = 0.03  # Head length
+
+        # Blue color for Z-axis
+        marker.color.r = 0.0
+        marker.color.g = 0.0
+        marker.color.b = 1.0
+        marker.color.a = 1.0
+
+        # Position at camera offset
+        camera_offset = self.config["frame"]["transform"]["position"]
+        marker.pose.position.x = camera_offset[0]
+        marker.pose.position.y = camera_offset[1]
+        marker.pose.position.z = camera_offset[2]
+
+        # Orient based on camera orientation
+        camera_orientation = self.config["frame"]["transform"]["orientation"]
+        q = tf.transformations.quaternion_from_euler(
+            camera_orientation[0], camera_orientation[1], camera_orientation[2]
+        )
+        marker.pose.orientation.x = q[0]
+        marker.pose.orientation.y = q[1]
+        marker.pose.orientation.z = q[2]
+        marker.pose.orientation.w = q[3]
+
+        # Publish the marker
+        self.camera_frame_pub.publish(marker)
+
+    def _visualize_frustum(self):
+        """Visualize the camera frustum."""
+        marker = Marker()
+        marker.header.frame_id = self.config["frame"]["reference_frame"]
         marker.header.stamp = rospy.Time.now()
         marker.ns = "camera_frustum"
         marker.id = 0
-
-        # Use a pyramid mesh for the frustum
-        if self.camera_config["field_of_view"]["type"] == "frustum":
-            marker.type = Marker.LINE_LIST
-        else:  # cone
-            marker.type = Marker.LINE_LIST  # We'll still use LINE_LIST for both types
-
+        marker.type = Marker.LINE_LIST
         marker.action = Marker.ADD
 
-        # Set marker scale
-        marker.scale.x = 0.01  # Line width
+        # Line width
+        marker.scale.x = 0.005
 
-        # Set marker color from config
-        color = self.camera_config["visualization"]["frustum_color"]
+        # Set color from config
+        color = self.config["visualization"]["frustum_color"]
         marker.color.r = color[0]
         marker.color.g = color[1]
         marker.color.b = color[2]
         marker.color.a = color[3] if len(color) > 3 else 0.5
 
         # Calculate frustum vertices
-        h_fov = math.radians(self.camera_config["field_of_view"]["horizontal_fov"] / 2)
-        v_fov = math.radians(self.camera_config["field_of_view"]["vertical_fov"] / 2)
-        near = self.camera_config["field_of_view"]["min_range"]
-        far = self.camera_config["field_of_view"]["max_range"]
+        h_fov = math.radians(self.config["field_of_view"]["horizontal_fov"] / 2)
+        v_fov = math.radians(self.config["field_of_view"]["vertical_fov"] / 2)
+        near = self.config["field_of_view"]["min_range"]
+        far = self.config["field_of_view"]["max_range"]
 
-        # Calculate near and far planes dimensions
+        # Calculate dimensions at near and far planes
         near_height = 2 * near * math.tan(v_fov)
         near_width = 2 * near * math.tan(h_fov)
         far_height = 2 * far * math.tan(v_fov)
         far_width = 2 * far * math.tan(h_fov)
 
-        # Define near plane corners (x forward, y left, z up)
-        near_top_left = Point(near, near_width / 2, near_height / 2)
-        near_top_right = Point(near, -near_width / 2, near_height / 2)
-        near_bottom_left = Point(near, near_width / 2, -near_height / 2)
-        near_bottom_right = Point(near, -near_width / 2, -near_height / 2)
+        # Define camera position (origin of frustum)
+        camera_offset = self.config["frame"]["transform"]["position"]
 
-        # Define far plane corners
-        far_top_left = Point(far, far_width / 2, far_height / 2)
-        far_top_right = Point(far, -far_width / 2, far_height / 2)
-        far_bottom_left = Point(far, far_width / 2, -far_height / 2)
-        far_bottom_right = Point(far, -far_width / 2, -far_height / 2)
+        # Near plane corners (z forward, y up, x right in camera frame)
+        near_top_right = Point(near_width / 2, near_height / 2, near)
+        near_top_left = Point(-near_width / 2, near_height / 2, near)
+        near_bottom_right = Point(near_width / 2, -near_height / 2, near)
+        near_bottom_left = Point(-near_width / 2, -near_height / 2, near)
 
-        # Define the camera position (origin of frustum)
+        # Far plane corners
+        far_top_right = Point(far_width / 2, far_height / 2, far)
+        far_top_left = Point(-far_width / 2, far_height / 2, far)
+        far_bottom_right = Point(far_width / 2, -far_height / 2, far)
+        far_bottom_left = Point(-far_width / 2, -far_height / 2, far)
+
+        # Camera origin
         origin = Point(0, 0, 0)
 
-        # Add lines for near plane
-        points = []
+        # Define lines for the frustum
+        lines = []
 
         # Near plane
-        points.extend([near_top_left, near_top_right])
-        points.extend([near_top_right, near_bottom_right])
-        points.extend([near_bottom_right, near_bottom_left])
-        points.extend([near_bottom_left, near_top_left])
+        lines.extend([near_top_left, near_top_right])
+        lines.extend([near_top_right, near_bottom_right])
+        lines.extend([near_bottom_right, near_bottom_left])
+        lines.extend([near_bottom_left, near_top_left])
 
         # Far plane
-        points.extend([far_top_left, far_top_right])
-        points.extend([far_top_right, far_bottom_right])
-        points.extend([far_bottom_right, far_bottom_left])
-        points.extend([far_bottom_left, far_top_left])
+        lines.extend([far_top_left, far_top_right])
+        lines.extend([far_top_right, far_bottom_right])
+        lines.extend([far_bottom_right, far_bottom_left])
+        lines.extend([far_bottom_left, far_top_left])
 
         # Connecting lines
-        points.extend([near_top_left, far_top_left])
-        points.extend([near_top_right, far_top_right])
-        points.extend([near_bottom_left, far_bottom_left])
-        points.extend([near_bottom_right, far_bottom_right])
+        lines.extend([near_top_left, far_top_left])
+        lines.extend([near_top_right, far_top_right])
+        lines.extend([near_bottom_left, far_bottom_left])
+        lines.extend([near_bottom_right, far_bottom_right])
 
-        # Add points to marker
-        marker.points = points
+        # Set the points
+        marker.points = lines
 
-        # Apply camera offset
-        marker.pose.position.x = self.camera_offset[0]
-        marker.pose.position.y = self.camera_offset[1]
-        marker.pose.position.z = self.camera_offset[2]
+        # Apply camera position offset
+        marker.pose.position.x = camera_offset[0]
+        marker.pose.position.y = camera_offset[1]
+        marker.pose.position.z = camera_offset[2]
 
         # Apply camera orientation
-        if any(self.camera_orientation):
-            q = tf.transformations.quaternion_from_euler(
-                self.camera_orientation[0],
-                self.camera_orientation[1],
-                self.camera_orientation[2],
-            )
-            marker.pose.orientation.x = q[0]
-            marker.pose.orientation.y = q[1]
-            marker.pose.orientation.z = q[2]
-            marker.pose.orientation.w = q[3]
-        else:
-            # Default orientation (camera looking forward)
-            marker.pose.orientation.w = 1.0
+        camera_orientation = self.config["frame"]["transform"]["orientation"]
+        q = tf.transformations.quaternion_from_euler(
+            camera_orientation[0], camera_orientation[1], camera_orientation[2]
+        )
+        marker.pose.orientation.x = q[0]
+        marker.pose.orientation.y = q[1]
+        marker.pose.orientation.z = q[2]
+        marker.pose.orientation.w = q[3]
 
-        # Publish the frustum marker
+        # Publish the frustum
         self.frustum_pub.publish(marker)
 
-    def _detect_objects(self):
-        """Detect objects that are within both the camera's field of view and the perception ROI."""
-        if not self.scene or not self.perception_roi:
-            return []
-
-        # Get all collision objects from the scene
-        scene_objects = self.scene.get_objects()
-
-        # Filter objects that are within the perception ROI and camera FOV
-        detected_objects = []
-
-        for obj_name, obj in scene_objects.items():
-            # Skip the ROI objects themselves
-            if obj_name in ["perception_roi", "robot_roi"]:
-                continue
-
-            # Check if object is in perception ROI and camera FOV
-            if self._is_object_in_roi(obj) and self._is_object_in_camera_fov(obj):
-                detected_objects.append((obj_name, obj))
-
-        return detected_objects
-
-    def _is_object_in_roi(self, obj):
-        """Check if an object is within the perception ROI."""
-        if not self.perception_roi or not obj.primitives:
-            return False
-
-        # Get perception ROI dimensions and position
-        roi_dims = list(self.perception_roi.primitives[0].dimensions)
-        roi_pos = self.perception_roi.primitive_poses[0].position
-
-        # Get object position and dimensions
-        obj_pos = obj.primitive_poses[0].position
-
-        # For simplicity, we'll use a bounding box check
-        # This is a simplified approximation - for more accurate results,
-        # proper collision checking would be needed
-
-        # Calculate half-dimensions of the ROI
-        roi_half_x = roi_dims[0] / 2
-        roi_half_y = roi_dims[1] / 2
-        roi_half_z = roi_dims[2] / 2
-
-        # Check if object center is within the ROI box
-        in_x_range = abs(obj_pos.x - roi_pos.x) <= roi_half_x
-        in_y_range = abs(obj_pos.y - roi_pos.y) <= roi_half_y
-        in_z_range = abs(obj_pos.z - roi_pos.z) <= roi_half_z
-
-        return in_x_range and in_y_range and in_z_range
-
-    def _is_object_in_camera_fov(self, obj):
-        """Check if an object is within the camera's field of view."""
-        if not hasattr(self, "camera_pose") or not obj.primitives:
-            return False
-
-        # Get camera position in world frame
-        cam_pos_world = Point(
-            self.camera_pose.transform.translation.x,
-            self.camera_pose.transform.translation.y,
-            self.camera_pose.transform.translation.z,
-        )
-
-        # Apply the camera offset in camera's local frame
-        # (simplified - we should really apply a full transform here)
-
-        # Get object position
-        obj_pos = obj.primitive_poses[0].position
-
-        # Calculate vector from camera to object
-        dx = obj_pos.x - cam_pos_world.x
-        dy = obj_pos.y - cam_pos_world.y
-        dz = obj_pos.z - cam_pos_world.z
-
-        # Calculate distance to object
-        distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-
-        # Check distance range
-        min_range = self.camera_config["field_of_view"]["min_range"]
-        max_range = self.camera_config["field_of_view"]["max_range"]
-        if distance < min_range or distance > max_range:
-            return False
-
-        # For a proper implementation, we would transform the object position
-        # into the camera frame and check if it's within the frustum angle
-        # For simplicity, we'll use a rough approximation here
-
-        # Convert horizontal and vertical FOV to radians
-        h_fov_rad = math.radians(self.camera_config["field_of_view"]["horizontal_fov"])
-        v_fov_rad = math.radians(self.camera_config["field_of_view"]["vertical_fov"])
-
-        # Get camera orientation quaternion
-        cam_quat = [
-            self.camera_pose.transform.rotation.x,
-            self.camera_pose.transform.rotation.y,
-            self.camera_pose.transform.rotation.z,
-            self.camera_pose.transform.rotation.w,
-        ]
-
-        # Convert camera quaternion to rotation matrix
-        cam_rot_matrix = tf.transformations.quaternion_matrix(cam_quat)
-
-        # Camera's forward vector in world frame
-        # In camera local frame, forward is along X
-        cam_forward = np.array(
-            [cam_rot_matrix[0, 0], cam_rot_matrix[1, 0], cam_rot_matrix[2, 0]]
-        )
-
-        # Normalize the forward vector
-        cam_forward = cam_forward / np.linalg.norm(cam_forward)
-
-        # Vector from camera to object
-        cam_to_obj = np.array([dx, dy, dz])
-
-        # Normalize
-        if np.linalg.norm(cam_to_obj) > 0:
-            cam_to_obj = cam_to_obj / np.linalg.norm(cam_to_obj)
-        else:
-            return False  # Object is at the same position as camera
-
-        # Compute the dot product (cosine of angle between vectors)
-        cos_angle = np.dot(cam_forward, cam_to_obj)
-
-        # Convert to angle
-        angle = math.acos(min(max(cos_angle, -1.0), 1.0))
-
-        # Simplified check - we're approximating the frustum as a cone
-        # The actual check would compute the horizontal and vertical angles separately
-        max_angle = max(h_fov_rad, v_fov_rad) / 2
-
-        return angle <= max_angle
-
-    def _visualize_detected_objects(self, detected_objects):
-        """Visualize the detected objects."""
-        marker_array = MarkerArray()
-
-        # Create markers for each detected object
-        for i, (obj_name, obj) in enumerate(detected_objects):
-            marker = Marker()
-            marker.header.frame_id = "base_link"
-            marker.header.stamp = rospy.Time.now()
-            marker.ns = "detected_objects"
-            marker.id = i
-            marker.type = Marker.CUBE  # Can be adapted based on object type
-            marker.action = Marker.ADD
-
-            # Set marker pose to object pose
-            marker.pose = obj.primitive_poses[0] if obj.primitive_poses else Pose()
-
-            # Set marker scale based on object dimensions
-            if obj.primitives and len(obj.primitives[0].dimensions) >= 3:
-                marker.scale.x = obj.primitives[0].dimensions[0]
-                marker.scale.y = obj.primitives[0].dimensions[1]
-                marker.scale.z = obj.primitives[0].dimensions[2]
-            else:
-                marker.scale = Vector3(0.1, 0.1, 0.1)  # Default size
-
-            # Set marker color (green for detected objects)
-            marker.color.r = 0.0
-            marker.color.g = 1.0
-            marker.color.b = 0.0
-            marker.color.a = 0.5
-
-            marker_array.markers.append(marker)
-
-        # Publish the marker array
-        self.detected_objects_pub.publish(marker_array)
-
-    def _publish_simulated_data(self, detected_objects):
-        """Generate and publish simulated sensor data for the detected objects."""
-        if not detected_objects:
+    def _check_part_visibility(self):
+        """Check if the part is visible within the camera frustum."""
+        if not self.part_mesh:
+            rospy.logwarn("Part mesh not available for visibility check")
+            self.is_visible = False
+            self.visibility_percentage = 0.0
             return
 
-        # Generate and publish data based on config
-        if self.camera_config["sensing"]["publish_rgb"]:
-            self._publish_rgb_image(detected_objects)
+        # Convert camera transform to a 4x4 matrix
+        camera_matrix = np.eye(4)
 
-        if self.camera_config["sensing"]["publish_depth"]:
-            self._publish_depth_image(detected_objects)
+        # Add translation from base_link to camera
+        camera_matrix[:3, 3] = self.camera_pos
 
-        if self.camera_config["sensing"]["publish_point_cloud"]:
-            self._publish_point_cloud(detected_objects)
+        # Add rotation from base_link to camera
+        rot_matrix = tf.transformations.quaternion_matrix(self.camera_rot)
+        camera_matrix[:3, :3] = rot_matrix[:3, :3]
 
-        # Always publish camera info
-        self._publish_camera_info()
+        # Apply the camera offset and orientation
+        offset = self.config["frame"]["transform"]["position"]
+        orientation = self.config["frame"]["transform"]["orientation"]
 
-    def _publish_rgb_image(self, detected_objects):
-        """Publish a simulated RGB image."""
-        # Create a blank image
-        width, height = 640, 480  # Standard VGA resolution
-        img = np.ones((height, width, 3), dtype=np.uint8) * 128  # Gray background
+        # Convert offset and orientation to a 4x4 matrix
+        offset_matrix = np.eye(4)
+        offset_matrix[:3, 3] = offset
 
-        # Add detected objects to the image (simplified)
-        for obj_name, obj in detected_objects:
-            # In a real implementation, project 3D objects onto 2D image
-            # Here we just draw random colored rectangles for demonstration
-            x1, y1 = random.randint(0, width // 2), random.randint(0, height // 2)
-            x2, y2 = x1 + random.randint(50, 200), y1 + random.randint(50, 200)
-            x2, y2 = min(x2, width - 1), min(y2, height - 1)
-            color = (
-                random.randint(0, 255),
-                random.randint(0, 255),
-                random.randint(0, 255),
+        orientation_matrix = tf.transformations.euler_matrix(
+            orientation[0], orientation[1], orientation[2]
+        )
+
+        # Camera pose in world frame is the composition of these transforms
+        camera_pose = np.dot(camera_matrix, np.dot(offset_matrix, orientation_matrix))
+
+        # Get frustum parameters
+        h_fov = math.radians(self.config["field_of_view"]["horizontal_fov"] / 2)
+        v_fov = math.radians(self.config["field_of_view"]["vertical_fov"] / 2)
+        near = self.config["field_of_view"]["min_range"]
+        far = self.config["field_of_view"]["max_range"]
+
+        # Create frustum using our custom function instead of trimesh.creation.frustum
+        frustum = create_frustum(
+            fovy=v_fov * 2, aspect=math.tan(h_fov) / math.tan(v_fov), near=near, far=far
+        )
+
+        # Transform frustum to camera pose
+        frustum.apply_transform(camera_pose)
+
+        # Try boolean operations only if they haven't failed before
+        if self.use_boolean_operations:
+            try:
+                # Check if both meshes are watertight (required for boolean operations)
+                if frustum.is_watertight and self.part_mesh.is_watertight:
+                    intersection = trimesh.boolean.intersection(
+                        [frustum, self.part_mesh]
+                    )
+                    if intersection is not None and intersection.volume > 0:
+                        self.is_visible = True
+                        self.visibility_percentage = (
+                            100.0 * intersection.volume / self.part_mesh.volume
+                        )
+                        # Visualize the intersection if enabled
+                        if self.config["visualization"]["show_intersection"]:
+                            self._visualize_intersection(intersection)
+                    else:
+                        self.is_visible = False
+                        self.visibility_percentage = 0.0
+                else:
+                    # Meshes aren't watertight, don't try boolean operations anymore
+                    self.use_boolean_operations = False
+                    rospy.logwarn(
+                        "One or both meshes are not watertight volumes. Using bounding box check instead."
+                    )
+                    self._check_visibility_with_bbox(frustum)
+            except ValueError as e:
+                # Handle "Not all meshes are volumes!" error
+                rospy.logwarn(
+                    f"Boolean operation failed: {e}. Switching to bounding box check for future updates."
+                )
+                self.use_boolean_operations = False
+                self._check_visibility_with_bbox(frustum)
+            except Exception as e:
+                rospy.logerr(f"Error in visibility check: {e}")
+                self.use_boolean_operations = False
+                self.is_visible = False
+                self.visibility_percentage = 0.0
+        else:
+            # Skip boolean operations since they failed before
+            self._check_visibility_with_bbox(frustum)
+
+        rospy.logdebug(
+            f"Part visibility: {self.is_visible}, percentage: {self.visibility_percentage:.1f}%"
+        )
+
+    def _check_visibility_with_bbox(self, frustum):
+        """Check visibility using bounding box overlap as a fallback method.
+
+        Args:
+            frustum: The camera frustum mesh
+        """
+        # Get the bounding boxes
+        frustum_bbox = frustum.bounding_box
+        part_bbox = self.part_mesh.bounding_box
+
+        # Check if bounding boxes overlap using manual check
+        # Get bounds as min/max corners
+        frustum_min, frustum_max = frustum_bbox.bounds
+        part_min, part_max = part_bbox.bounds
+
+        # Check if the boxes overlap in all three dimensions
+        overlap = (
+            frustum_min[0] <= part_max[0]
+            and frustum_max[0] >= part_min[0]
+            and frustum_min[1] <= part_max[1]
+            and frustum_max[1] >= part_min[1]
+            and frustum_min[2] <= part_max[2]
+            and frustum_max[2] >= part_min[2]
+        )
+
+        if overlap:
+            # Approximate visibility based on distance from camera to part center
+            part_center = self.part_mesh.centroid
+            camera_pos = np.array(
+                [self.camera_pos[0], self.camera_pos[1], self.camera_pos[2]]
             )
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, -1)
-            cv2.putText(
-                img,
-                obj_name,
-                (x1 + 5, y1 + 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 0, 0),
-                1,
+
+            # Calculate distance
+            distance = np.linalg.norm(camera_pos - part_center)
+            max_distance = self.config["field_of_view"]["max_range"]
+            min_distance = self.config["field_of_view"]["min_range"]
+
+            # Normalize distance to 0-1 range and invert (closer = higher visibility)
+            normalized_distance = 1.0 - min(
+                1.0, max(0.0, (distance - min_distance) / (max_distance - min_distance))
             )
 
-        # Convert to ROS image and publish
-        img_msg = self.cv_bridge.cv2_to_imgmsg(img, encoding="rgb8")
-        img_msg.header.stamp = rospy.Time.now()
-        img_msg.header.frame_id = self.camera_config["frame"]["reference_frame"]
-        self.rgb_pub.publish(img_msg)
+            # Approximate visibility percentage
+            self.is_visible = True
+            self.visibility_percentage = normalized_distance * 100.0
 
-    def _publish_depth_image(self, detected_objects):
-        """Publish a simulated depth image."""
-        # Create a blank depth image (far distance by default)
+            # Create a simple intersection visualization
+            if self.config["visualization"]["show_intersection"]:
+                self._visualize_approximate_intersection(frustum_bbox, part_bbox)
+        else:
+            self.is_visible = False
+            self.visibility_percentage = 0.0
+
+    def _visualize_approximate_intersection(self, frustum_bbox, part_bbox):
+        """Visualize an approximate intersection between bounding boxes.
+
+        Args:
+            frustum_bbox: Bounding box of the frustum
+            part_bbox: Bounding box of the part
+        """
+        # Create marker for visualization
+        marker = Marker()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "part_intersection"
+        marker.id = 0
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+
+        # Calculate the overlapping region of the bounding boxes
+        # This is a simplification - in reality, we'd need to calculate the actual intersection
+        # of the two boxes, but for visualization purposes this approximation is sufficient
+        center = (frustum_bbox.centroid + part_bbox.centroid) / 2.0
+        marker.pose.position.x = center[0]
+        marker.pose.position.y = center[1]
+        marker.pose.position.z = center[2]
+
+        # Set orientation to identity
+        marker.pose.orientation.w = 1.0
+
+        # Set scale to approximate intersection size (this is a simple approximation)
+        avg_scale = (np.array(frustum_bbox.extents) + np.array(part_bbox.extents)) / 4.0
+        marker.scale.x = max(avg_scale[0], 0.01)
+        marker.scale.y = max(avg_scale[1], 0.01)
+        marker.scale.z = max(avg_scale[2], 0.01)
+
+        # Set color (yellow for approximate intersection)
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 0.5
+
+        # Publish the marker
+        self.intersection_pub.publish(marker)
+
+    def _visualize_intersection(self, intersection_mesh):
+        """Visualize the intersection between the frustum and part."""
+        if not intersection_mesh:
+            return
+
+        # Create marker for visualization
+        marker = Marker()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "part_intersection"
+        marker.id = 0
+        marker.type = Marker.MESH_RESOURCE
+        marker.action = Marker.ADD
+
+        # For a real mesh, we would save the intersection mesh to a file and load it here
+        # For this example, we'll just use a cube marker
+        marker.type = Marker.CUBE
+
+        # Set position to center of intersection
+        center = intersection_mesh.centroid
+        marker.pose.position.x = center[0]
+        marker.pose.position.y = center[1]
+        marker.pose.position.z = center[2]
+
+        # Set orientation to identity
+        marker.pose.orientation.w = 1.0
+
+        # Set scale based on bounding box
+        bounds = intersection_mesh.bounds
+        scale = bounds[1] - bounds[0]
+        marker.scale.x = max(scale[0], 0.01)
+        marker.scale.y = max(scale[1], 0.01)
+        marker.scale.z = max(scale[2], 0.01)
+
+        # Set color (green for intersection)
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 0.7
+
+        # Publish the marker
+        self.intersection_pub.publish(marker)
+
+    def _visualize_part(self):
+        """Visualize the part mesh."""
+        if not self.part_mesh:
+            return
+
+        # Create marker for visualization
+        marker = Marker()
+        marker.header.frame_id = "base_link"
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "part"
+        marker.id = 0
+        marker.type = Marker.CUBE  # Using a cube for simplicity
+        marker.action = Marker.ADD
+
+        # Set position to center of part
+        center = self.part_mesh.centroid
+        marker.pose.position.x = center[0]
+        marker.pose.position.y = center[1]
+        marker.pose.position.z = center[2]
+
+        # Set orientation to identity
+        marker.pose.orientation.w = 1.0
+
+        # Set scale based on bounding box
+        bounds = self.part_mesh.bounds
+        scale = bounds[1] - bounds[0]
+        marker.scale.x = max(scale[0], 0.01)
+        marker.scale.y = max(scale[1], 0.01)
+        marker.scale.z = max(scale[2], 0.01)
+
+        # Set color (blue for part)
+        marker.color.r = 0.2
+        marker.color.g = 0.2
+        marker.color.b = 1.0
+        marker.color.a = 0.5
+
+        # Publish the marker
+        self.part_pub.publish(marker)
+
+    def _publish_camera_data(self):
+        """Publish simulated camera data streams."""
+        # Only publish if the part is visible
+        if not self.is_visible:
+            return
+
+        # Get camera resolution
         width, height = 640, 480
-        max_range = self.camera_config["field_of_view"]["max_range"]
-        depth_img = np.ones((height, width), dtype=np.float32) * max_range
 
-        # Add detected objects to the depth image (simplified)
-        for obj_name, obj in detected_objects:
-            # In a real implementation, project 3D objects onto 2D depth image
-            # Here we just draw random depth regions for demonstration
-            x1, y1 = random.randint(0, width // 2), random.randint(0, height // 2)
-            x2, y2 = x1 + random.randint(50, 200), y1 + random.randint(50, 200)
-            x2, y2 = min(x2, width - 1), min(y2, height - 1)
+        # 1. RGB Image
+        rgb_img = np.zeros((height, width, 3), dtype=np.uint8)
 
-            # Random depth value between min and max range
-            min_range = self.camera_config["field_of_view"]["min_range"]
-            depth_value = random.uniform(min_range, max_range * 0.8)
+        # Fill with a gradient
+        for y in range(height):
+            for x in range(width):
+                rgb_img[y, x] = [int(255 * x / width), int(255 * y / height), 128]
 
-            # Add some noise
-            noise_level = self.camera_config["sensing"]["noise_level"]
-            noise = np.random.normal(0, noise_level, (y2 - y1, x2 - x1))
+        # Add a marker in the center showing the part
+        cv2.circle(
+            rgb_img,
+            center=(width // 2, height // 2),
+            radius=int(50 * self.visibility_percentage / 100.0),
+            color=(0, 255, 0),
+            thickness=-1,
+        )
 
-            # Set depth values with noise
-            depth_img[y1:y2, x1:x2] = depth_value + noise
+        # Convert to ROS Image and publish
+        rgb_msg = self.cv_bridge.cv2_to_imgmsg(rgb_img, encoding="rgb8")
+        rgb_msg.header.stamp = rospy.Time.now()
+        rgb_msg.header.frame_id = self.config["frame"]["reference_frame"]
+        self.rgb_pub.publish(rgb_msg)
 
-        # Convert to ROS image and publish
-        img_msg = self.cv_bridge.cv2_to_imgmsg(depth_img, encoding="32FC1")
-        img_msg.header.stamp = rospy.Time.now()
-        img_msg.header.frame_id = self.camera_config["frame"]["reference_frame"]
-        self.depth_pub.publish(img_msg)
+        # 2. Depth Image
+        depth_img = np.ones((height, width), dtype=np.float32) * 5.0  # 5m background
 
-    def _publish_point_cloud(self, detected_objects):
-        """Publish a simulated point cloud for the detected objects."""
-        header = Header()
-        header.stamp = rospy.Time.now()
-        header.frame_id = self.camera_config["frame"]["reference_frame"]
+        # Add a circular depth region in the center
+        center_x, center_y = width // 2, height // 2
+        radius = int(100 * self.visibility_percentage / 100.0)
 
-        # Create point cloud data (simplified)
+        for y in range(height):
+            for x in range(width):
+                # Calculate distance from center
+                dist = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+                if dist < radius:
+                    # Depth value decreases towards center
+                    depth_img[y, x] = 1.0 - 0.5 * (1 - dist / radius)
+
+        # Convert to ROS Image and publish
+        depth_msg = self.cv_bridge.cv2_to_imgmsg(depth_img, encoding="32FC1")
+        depth_msg.header.stamp = rospy.Time.now()
+        depth_msg.header.frame_id = self.config["frame"]["reference_frame"]
+        self.depth_pub.publish(depth_msg)
+
+        # 3. Camera Info
+        camera_info = CameraInfo()
+        camera_info.header.stamp = rospy.Time.now()
+        camera_info.header.frame_id = self.config["frame"]["reference_frame"]
+        camera_info.width = width
+        camera_info.height = height
+
+        # Set intrinsic parameters
+        fx = fy = width / (
+            2
+            * math.tan(math.radians(self.config["field_of_view"]["horizontal_fov"]) / 2)
+        )
+        cx = width / 2
+        cy = height / 2
+
+        camera_info.K = [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+        camera_info.P = [fx, 0, cx, 0, 0, fy, cy, 0, 0, 0, 1, 0]
+        camera_info.R = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        camera_info.D = [0, 0, 0, 0, 0]  # No distortion
+        camera_info.distortion_model = "plumb_bob"
+
+        self.camera_info_pub.publish(camera_info)
+
+        # 4. Point Cloud
+        # Create a simple point cloud from the depth image
         points = []
-        for obj_name, obj in detected_objects:
-            # Generate random points for each object
-            num_points = 100  # Number of points per object
 
-            # Get object position and dimensions
-            position = (
-                obj.primitive_poses[0].position if obj.primitive_poses else Point()
-            )
-            dimensions = (
-                list(obj.primitives[0].dimensions)
-                if obj.primitives
-                else [0.1, 0.1, 0.1]
-            )
+        # Sample a subset of points for efficiency
+        step = 10
+        for y in range(0, height, step):
+            for x in range(0, width, step):
+                # Skip points at max depth
+                if depth_img[y, x] >= 5.0:
+                    continue
 
-            # Generate random points within the object's bounds
-            for _ in range(num_points):
-                # Random point within object dimensions
-                x_offset = random.uniform(-dimensions[0] / 2, dimensions[0] / 2)
-                y_offset = random.uniform(-dimensions[1] / 2, dimensions[1] / 2)
-                z_offset = random.uniform(-dimensions[2] / 2, dimensions[2] / 2)
+                # Calculate 3D point
+                depth = depth_img[y, x]
 
-                # Point coordinates relative to object center
-                x = position.x + x_offset
-                y = position.y + y_offset
-                z = position.z + z_offset
+                # Use camera model to project to 3D
+                z = depth
+                x3d = (x - cx) * z / fx
+                y3d = (y - cy) * z / fy
 
-                # Add some noise
-                noise_level = self.camera_config["sensing"]["noise_level"]
-                x += random.gauss(0, noise_level)
-                y += random.gauss(0, noise_level)
-                z += random.gauss(0, noise_level)
+                # Get RGB color
+                r, g, b = rgb_img[y, x]
 
-                # Random color (RGB)
-                r = random.randint(0, 255)
-                g = random.randint(0, 255)
-                b = random.randint(0, 255)
+                # Pack RGB into an integer
+                rgb_packed = (r << 16) | (g << 8) | b
 
-                # Pack RGB into a single integer
-                rgb = (r << 16) | (g << 8) | b
-
-                # Add point with coordinates and color
-                points.append([x, y, z, rgb])
+                # Add the point
+                points.append([x3d, y3d, z, rgb_packed])
 
         # Create point cloud message
-        fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
-        ]
-
-        # Create and publish point cloud
         if points:
+            header = Header()
+            header.stamp = rospy.Time.now()
+            header.frame_id = self.config["frame"]["reference_frame"]
+
+            fields = [
+                pc2.PointField(
+                    name="x", offset=0, datatype=pc2.PointField.FLOAT32, count=1
+                ),
+                pc2.PointField(
+                    name="y", offset=4, datatype=pc2.PointField.FLOAT32, count=1
+                ),
+                pc2.PointField(
+                    name="z", offset=8, datatype=pc2.PointField.FLOAT32, count=1
+                ),
+                pc2.PointField(
+                    name="rgb", offset=12, datatype=pc2.PointField.UINT32, count=1
+                ),
+            ]
+
             pc_msg = pc2.create_cloud(header, fields, points)
             self.pointcloud_pub.publish(pc_msg)
 
-    def _publish_camera_info(self):
-        """Publish camera intrinsic parameters."""
-        # Create camera info message with standard parameters
-        cam_info = CameraInfo()
-        cam_info.header.stamp = rospy.Time.now()
-        cam_info.header.frame_id = self.camera_config["frame"]["reference_frame"]
+    def is_part_visible(self):
+        """Return whether the part is visible in the camera frustum."""
+        return self.is_visible
 
-        # Set image dimensions
-        cam_info.width = 640
-        cam_info.height = 480
-
-        # Set camera matrix (K) - focal lengths and principal point
-        fx = fy = 525.0  # Standard focal length for 640x480 images
-        cx = 320.0  # Principal point x (usually width/2)
-        cy = 240.0  # Principal point y (usually height/2)
-        cam_info.K = [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-
-        # Set projection matrix (P)
-        cam_info.P = [fx, 0, cx, 0, 0, fy, cy, 0, 0, 0, 1, 0]
-
-        # Set rectification matrix (R) - identity for non-stereo cameras
-        cam_info.R = [1, 0, 0, 0, 1, 0, 0, 0, 1]
-
-        # Set distortion parameters - assume no distortion
-        cam_info.D = [0, 0, 0, 0, 0]
-
-        # Set distortion model
-        cam_info.distortion_model = "plumb_bob"
-
-        # Publish the camera info
-        self.camera_info_pub.publish(cam_info)
-
-    def get_detected_objects(self):
-        """Get the currently detected objects."""
-        return self._detect_objects()
+    def get_visibility_percentage(self):
+        """Return the percentage of the part's volume visible in the frustum."""
+        return self.visibility_percentage
 
     def shutdown(self):
-        """Shutdown the perception system."""
-        if hasattr(self, "perception_timer"):
-            self.perception_timer.shutdown()
+        """Shutdown the detection system."""
+        if hasattr(self, "update_timer"):
+            self.update_timer.shutdown()
         rospy.loginfo("SimulatedPerception shutdown")
 
 
 if __name__ == "__main__":
-    # Test the simulated perception system
-    perception = SimulatedPerception()
+    # Test the frustum detection
+    detector = SimulatedPerception()
     rospy.loginfo("SimulatedPerception is running. Press Ctrl+C to stop.")
-    rospy.spin()
+
+    try:
+        rospy.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        detector.shutdown()

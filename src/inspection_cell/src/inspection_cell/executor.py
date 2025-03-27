@@ -15,72 +15,19 @@ class Executor:
     It includes functionality for verifying plans before execution and monitoring execution.
     """
 
-    def __init__(self, move_group_name="manipulator", check_collisions=True):
+    def __init__(self, move_group_name="manipulator"):
         """
         Initialize the executor with a specific move group.
 
         Args:
             move_group_name: Name of the MoveIt move group to use
-            check_collisions: Whether to check for collisions before execution
         """
         self.robot = RobotCommander()
         self.move_group = MoveGroupCommander(move_group_name)
         self.group_name = move_group_name
-        self.check_collisions = check_collisions
-
-        # Initialize collision checker if needed
-        if check_collisions:
-            self.collision_checker = CollisionCheck(move_group_name=move_group_name)
-            rospy.loginfo("Collision checker initialized for execution safety checks")
-
         rospy.loginfo(f"Executor initialized for group: {move_group_name}")
 
-    def check_plan_safety(self, plan):
-        """
-        Check if a motion plan is safe to execute (collision-free).
-
-        Args:
-            plan: Motion plan to check
-
-        Returns:
-            bool: True if the plan is safe, False otherwise
-        """
-        if not self.check_collisions:
-            rospy.loginfo("Collision checking is disabled, skipping safety check")
-            return True
-
-        if not plan or not plan.joint_trajectory.points:
-            rospy.logerr("Cannot check safety of empty plan")
-            return False
-
-        # Check trajectory points for collisions
-        rospy.loginfo(
-            f"Checking safety of trajectory with {len(plan.joint_trajectory.points)} points"
-        )
-
-        # For efficiency, check only a subset of points for longer trajectories
-        points = plan.joint_trajectory.points
-        if len(points) > 10:
-            # Skip points to check approximately 10 points evenly spaced
-            step = len(points) // 10
-            points_to_check = [points[i] for i in range(0, len(points), step)]
-            points_to_check.append(points[-1])  # Always check the final point
-        else:
-            points_to_check = points
-
-        # Check each selected point
-        for i, point in enumerate(points_to_check):
-            joint_positions = list(point.positions)
-            is_valid = self.collision_checker.check_state_validity(joint_positions)
-            if not is_valid:
-                rospy.logwarn(f"Trajectory point {i} is in collision!")
-                rospy.logwarn(self.collision_checker.get_collision_report())
-                return False
-
-        rospy.loginfo("Trajectory passed safety check")
-        return True
-
-    def execute_plan(self, plan, verify_safety=True, wait=True):
+    def execute_plan(self, plan, wait=True):
         """
         Execute a motion plan.
 
@@ -95,12 +42,6 @@ class Executor:
         if not plan or not plan.joint_trajectory.points:
             rospy.logerr("Cannot execute empty plan")
             return False
-
-        # Check plan safety if requested
-        if verify_safety and self.check_collisions:
-            if not self.check_plan_safety(plan):
-                rospy.logerr("Plan failed safety check, aborting execution")
-                return False
 
         # Execute the plan
         rospy.loginfo(

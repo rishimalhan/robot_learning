@@ -15,3 +15,5 @@ gym
 trimesh
 numpy
 meshio
+opencv-python-headless
+scipy

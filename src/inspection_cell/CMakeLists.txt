@@ -170,10 +170,12 @@ catkin_install_python(PROGRAMS
   src/inspection_cell/load_system.py
   src/inspection_cell/planner.py
   src/inspection_cell/executor.py
+  src/inspection_cell/simulated_perception.py
   scripts/test_move_robot.py
   scripts/test_check_collision.py
   scripts/test_collision_checker.py
   scripts/sample_roi_poses.py
+  scripts/test_simulated_perception.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
