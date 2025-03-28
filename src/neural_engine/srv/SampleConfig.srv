@@ -1,4 +1,0 @@
-float64[] current_joints  # Current joint positions
----
-float64[] sampled_joints  # Sampled joint positions that are within 90 degrees
-bool success              # Whether a valid configuration was found 

@@ -1,5 +1,5 @@
 ### Conda use ###
-1. Clean all catkin directories
+1. Remove the .catkin_tools directory
 
 2. Create temporary catkin profile
 catkin config \
