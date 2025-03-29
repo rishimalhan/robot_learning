@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Neural Engine launch file -->
+  <!-- Launch the simulated perception node -->
+  
+  <!-- Optional parameters for controlling the simulated perception -->
+  <arg name="rate_hz" default="10" doc="Frame rate for the simulated perception in Hz"/>
+  
+  <!-- Load perception parameters from config file if exists -->
+  <rosparam command="load" file="$(find neural_engine)/config/perception.yaml"/>
+  
+  <!-- Node definition with improved shutdown handling -->
+  <node name="simulated_perception" pkg="neural_engine" type="simulated_perception.py" 
+        output="screen" respawn="false" required="true">
+    <!-- Pass parameters to the node -->
+    <param name="/perception/camera/sensing/frame_rate" value="$(arg rate_hz)"/>
+  </node>
+  
+</launch>
