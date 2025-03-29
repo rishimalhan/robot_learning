@@ -413,19 +413,19 @@ class SimulatedCamera:
         # Update camera transform
         self._update_camera_transform(camera_transform.astype(np.float32))
 
-        # Render RGB
-        rospy.loginfo("Rendering RGB image...")
+        # # Render RGB
+        # rospy.loginfo("Rendering RGB image...")
 
-        # Set a maximum render time for RGB
-        start_time = time.time()
-        rgba = self.renderer(self.mesh)
-        render_time = time.time() - start_time
-        rospy.loginfo(f"RGB rendering completed in {render_time:.2f} seconds")
+        # # Set a maximum render time for RGB
+        # start_time = time.time()
+        # rgba = self.renderer(self.mesh)
+        # render_time = time.time() - start_time
+        # rospy.loginfo(f"RGB rendering completed in {render_time:.2f} seconds")
 
-        rgb = rgba[0, ..., :3].detach().cpu().numpy().astype(np.float32)
-        rospy.loginfo(
-            f"RGB image shape: {rgb.shape}, range: [{rgb.min():.2f}, {rgb.max():.2f}]"
-        )
+        # rgb = rgba[0, ..., :3].detach().cpu().numpy().astype(np.float32)
+        # rospy.loginfo(
+        #     f"RGB image shape: {rgb.shape}, range: [{rgb.min():.2f}, {rgb.max():.2f}]"
+        # )
 
         # Render depth
         rospy.loginfo("Rendering depth image...")
@@ -457,7 +457,7 @@ class SimulatedCamera:
                 f"Depth range after noise: [{depth.min():.2f}, {depth.max():.2f}]"
             )
 
-        return rgb, depth
+        return None, depth
 
     def _render_timeout_handler(self, signum, frame):
         """Handle timeouts in rendering."""
@@ -494,6 +494,10 @@ class SimulatedCamera:
         if return_colors and rgb is not None:
             colors = rgb[valid]
             rospy.loginfo(f"Added colors to point cloud")
+            return xyz, colors
+        elif return_colors:
+            # Create default gray colors when rgb is None
+            colors = np.ones((len(xyz), 3), dtype=np.float32) * 0.5
             return xyz, colors
 
         return xyz
@@ -573,16 +577,16 @@ class SimulatedCamera:
             camera_info = self.intrinsics.to_camera_info(self.camera_frame_id)
             camera_info.header.stamp = timestamp
 
-            # Publish RGB image
-            rospy.loginfo("Publishing RGB image...")
-            rgb_msg = self.bridge.cv2_to_imgmsg(
-                cv2.cvtColor((rgb * 255).astype(np.uint8), cv2.COLOR_RGB2BGR),
-                encoding="bgr8",
-            )
-            rgb_msg.header.frame_id = self.camera_frame_id
-            rgb_msg.header.stamp = timestamp
-            self.rgb_pub.publish(rgb_msg)
-            self.rgb_info_pub.publish(camera_info)
+            # # Publish RGB image
+            # rospy.loginfo("Publishing RGB image...")
+            # rgb_msg = self.bridge.cv2_to_imgmsg(
+            #     cv2.cvtColor((rgb * 255).astype(np.uint8), cv2.COLOR_RGB2BGR),
+            #     encoding="bgr8",
+            # )
+            # rgb_msg.header.frame_id = self.camera_frame_id
+            # rgb_msg.header.stamp = timestamp
+            # self.rgb_pub.publish(rgb_msg)
+            # self.rgb_info_pub.publish(camera_info)
 
             # Publish depth image
             rospy.loginfo("Publishing depth image...")

@@ -6,8 +6,8 @@ mesh:
 
 # Camera configuration
 camera:
-  # Image size
-  image_size: [480, 640]
+  # Image size - reduced resolution for faster processing
+  image_size: [240, 320]
 
   # Frame settings
   frame: "tool0"
@@ -22,18 +22,12 @@ camera:
   
   # Sensing settings
   sensing:
-    frame_rate: 30
-    noise_level: 0.005
-    publish_rgb: true
+    frame_rate: 10  # Reduced frame rate to reduce CPU load
+    noise_level: 0.0  # Removed noise for faster processing
+    publish_rgb: false  # Disable RGB publishing to focus on depth
     publish_depth: true
     publish_point_cloud: true
   
   # Rendering settings
   rendering:
-    shader_type: "soft_phong"
-    
-  # Visualization settings
-  visualization:
-    show_camera_frame: true
-    show_frustum: true
-    frustum_color: [0.0, 0.7, 1.0, 0.3]
+    shader_type: "hard_phong"  # Using hard_phong instead of soft_phong for speed
