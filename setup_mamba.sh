@@ -9,3 +9,4 @@ mamba activate robot_learning
 mamba install compilers cmake pkg-config make ninja colcon-common-extensions catkin_tools rosdep
 pip install -r docker/python-packages.txt
 mamba install ros-noetic-moveit
+pip install "git+https://github.com/facebookresearch/pytorch3d.git"

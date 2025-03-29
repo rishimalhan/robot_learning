@@ -3,7 +3,6 @@
 # External
 
 import rospy
-import yaml
 import os
 from tf.transformations import quaternion_from_euler
 from moveit_commander import MoveGroupCommander, PlanningSceneInterface, RobotCommander
@@ -20,10 +19,15 @@ from moveit_msgs.msg import (
 )
 from moveit_msgs.srv import ApplyPlanningScene
 from std_msgs.msg import ColorRGBA
+from inspection_cell.planner import Planner
 
 # Internal
 
-from inspection_cell.utils import resolve_package_path
+from inspection_cell.utils import (
+    resolve_package_path,
+    load_yaml_to_params,
+    get_param,
+)
 from inspection_cell.collision_checker import CollisionCheck
 
 
@@ -39,7 +43,7 @@ class EnvironmentLoader:
         self.move_group = MoveGroupCommander(move_group_name)
         self.robot = RobotCommander()
         self.group_name = move_group_name
-
+        self.planner = Planner()
         # Create RosPack instance
         self.rospack = rospkg.RosPack()
 
@@ -78,13 +82,15 @@ class EnvironmentLoader:
         rospy.loginfo("Collision checker initialized")
 
     def _load_config(self):
-        """Load environment configuration from YAML file."""
+        """Load environment configuration from YAML file and store in parameter server."""
         config_path = os.path.join(
             self.rospack.get_path("inspection_cell"), "config", "environment.yaml"
         )
         rospy.loginfo(f"Loading configuration from: {config_path}")
-        with open(config_path, "r") as f:
-            self.config = yaml.safe_load(f)
+
+        # Load YAML to parameter server
+        self.config = load_yaml_to_params(config_path, "/environment")
+        rospy.loginfo("Environment configuration loaded to parameter server")
 
     def clear_scene(self):
         """Clear all objects from the planning scene."""
@@ -104,20 +110,23 @@ class EnvironmentLoader:
 
     def _configure_robot(self):
         """Configure robot parameters from config file."""
-        robot_config = self.config["robot"]
-        self.move_group.set_planning_time(robot_config["planning_time"])
-        self.move_group.set_num_planning_attempts(robot_config["num_planning_attempts"])
+        robot_config = get_param("/environment/robot", {})
+        self.move_group.set_planning_time(robot_config.get("planning_time", 2.0))
+        self.move_group.set_num_planning_attempts(
+            robot_config.get("num_planning_attempts", 5)
+        )
         self.move_group.set_max_velocity_scaling_factor(
-            robot_config["max_velocity_scaling_factor"]
+            robot_config.get("max_velocity_scaling_factor", 1.0)
         )
         self.move_group.set_max_acceleration_scaling_factor(
-            robot_config["max_acceleration_scaling_factor"]
+            robot_config.get("max_acceleration_scaling_factor", 1.0)
         )
         rospy.loginfo("Robot parameters configured")
 
     def _add_objects_to_scene(self):
         """Add objects to the planning scene based on configuration."""
-        rospy.loginfo(f"Adding {len(self.config['objects'])} objects to scene")
+        objects = get_param("/environment/objects", {})
+        rospy.loginfo(f"Adding {len(objects)} objects to scene")
 
         # Create planning scene publisher
         planning_scene_pub = rospy.Publisher(
@@ -125,7 +134,7 @@ class EnvironmentLoader:
         )
         rospy.sleep(0.5)  # Allow publisher to initialize
 
-        for name, obj in self.config["objects"].items():
+        for name, obj in objects.items():
             self._add_single_object(name, obj, planning_scene_pub)
 
         # Wait for the scene to update
@@ -242,7 +251,7 @@ class EnvironmentLoader:
             rospy.logerr(f"Mesh path not specified for object {name}")
             return False
 
-        # Remove package:// prefix if present
+        # Resolve package:// prefix
         mesh_path = resolve_package_path(mesh_path)
         rospy.loginfo(f"Loading mesh from: {mesh_path}")
 
