@@ -13,7 +13,6 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_ros
   moveit_commander
   sensor_msgs
-  cv_bridge
   std_msgs
 )
 
@@ -183,7 +182,7 @@ catkin_install_python(PROGRAMS
 # )
 
 ## Mark cpp header files for installation
-install(DIRECTORY config
+install(DIRECTORY config launch
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 

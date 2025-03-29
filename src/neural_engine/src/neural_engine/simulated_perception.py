@@ -1,259 +1,150 @@
 #! /usr/bin/env python3
 
-# External
-
 import torch
 import numpy as np
-import os
 import rospy
 from dataclasses import dataclass
-from pytorch3d.renderer import (
-    FoVPerspectiveCameras,
-    RasterizationSettings,
-    MeshRenderer,
-    MeshRasterizer,
-    HardPhongShader,
-    SoftPhongShader,
-    TexturesVertex,
-    PointLights,
-    BlendParams,
-)
-from pytorch3d.structures import Meshes
-from tf.transformations import (
-    euler_matrix,
-    euler_from_quaternion,
-)
-import tempfile
 from moveit_commander import PlanningSceneInterface
 import tf2_ros
-from sensor_msgs.msg import CameraInfo, PointCloud2, PointField
+from sensor_msgs.msg import PointCloud2, PointField
 import std_msgs.msg
 import sensor_msgs.point_cloud2 as pc2
-import sys
 import time
-import signal
-import threading
-import atexit
-
-# Internal
-
-from neural_engine.utils import bootstrap, get_param
-
-bootstrap()
-
-# Global flag for clean shutdown
-shutdown_flag = threading.Event()
+from tf.transformations import euler_matrix, euler_from_quaternion
+from typing import Any
 
 
-def cleanup_handler():
-    """Cleanup handler to ensure proper shutdown"""
-    rospy.loginfo("Cleaning up resources...")
-    shutdown_flag.set()
-    # Clear CUDA cache
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    # Clear MPS cache if available
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-
-
-def signal_handler(signum, frame):
-    """Signal handler for graceful shutdown"""
-    rospy.loginfo(f"Received signal {signum}")
-    cleanup_handler()
-    sys.exit(0)
-
-
-# Register signal handlers
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-# Register cleanup on normal exit
-atexit.register(cleanup_handler)
+def get_param(param_name: str, default: Any = None) -> Any:
+    """Get a parameter from the ROS parameter server."""
+    return rospy.get_param(param_name, default)
 
 
 @dataclass
-class CameraIntrinsics:
-    """Camera intrinsic parameters."""
+class CameraParameters:
+    """Camera parameters for point cloud generation."""
 
-    width: int
-    height: int
-    fx: float
-    fy: float
-    cx: float
-    cy: float
+    frame_id: str
 
-    @classmethod
-    def from_fov(cls, width: int, height: int, fov_degrees: float):
-        """Create intrinsics from field of view."""
-        fx = fy = (width / 2) / np.tan(np.radians(fov_degrees) / 2)
-        cx = width / 2
-        cy = height / 2
-        return cls(width, height, fx, fy, cx, cy)
+    # Geometric constraints
+    max_normal_angle: (
+        float  # Maximum angle between triangle normal and camera direction (degrees)
+    )
+    min_vertical_distance: float  # Minimum vertical distance (meters)
+    max_vertical_distance: float  # Maximum vertical distance (meters)
+    max_horizontal_distance: float  # Maximum horizontal distance (meters)
 
-    def to_matrix(self) -> np.ndarray:
-        """Convert to 3x3 intrinsic matrix."""
-        return np.array([[self.fx, 0, self.cx], [0, self.fy, self.cy], [0, 0, 1]])
-
-    def to_camera_info(self, frame_id: str) -> CameraInfo:
-        """Convert to ROS CameraInfo message."""
-        camera_info = CameraInfo()
-        camera_info.header.frame_id = frame_id
-        camera_info.height = self.height
-        camera_info.width = self.width
-        camera_info.distortion_model = "plumb_bob"
-        camera_info.D = [0.0, 0.0, 0.0, 0.0, 0.0]  # No distortion
-        camera_info.K = [self.fx, 0.0, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0]
-        camera_info.R = [
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-        ]  # Identity rotation
-        camera_info.P = [
-            self.fx,
-            0.0,
-            self.cx,
-            0.0,
-            0.0,
-            self.fy,
-            self.cy,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-        ]
-        return camera_info
+    # Sensing parameters
+    noise_horizontal: float  # Standard deviation for horizontal Gaussian noise (meters)
+    noise_vertical: float  # Standard deviation for vertical Gaussian noise (meters)
+    noise_distance_factor: float  # Factor for scaling noise with distance
 
 
-class SimulatedCamera:
-    """A simulated camera using PyTorch3D rendering."""
+class SimulatedPerception:
+    """Generate point clouds directly from mesh vertices using efficient GPU operations."""
 
-    def __init__(
-        self,
-        device: str = (
-            "cpu"
-            if torch.backends.mps.is_available()
-            else "cuda" if torch.cuda.is_available() else "cpu"
-        ),
-    ):
-        """Initialize a simulated camera."""
-        rospy.loginfo("Initializing SimulatedCamera...")
-        rospy.loginfo(f"Using device: {device}")
+    def __init__(self):
+        """Initialize the point cloud generator."""
+        rospy.loginfo("Initializing SimulatedPerception...")
 
-        # Get camera configuration from parameter server
-        self.fov_config = get_param("/perception/camera/field_of_view")
-        self.sensing_config = get_param("/perception/camera/sensing")
-        self.image_size = get_param("/perception/camera/image_size")
-        rospy.loginfo(
-            f"Camera config - FOV: {self.fov_config}, Image size: {self.image_size}"
-        )
+        # Select optimal device for computation
+        self.device = self._select_optimal_device()
+        rospy.loginfo(f"Using device: {self.device}")
 
-        # Configure from parameters
-        self.fov_degrees = self.fov_config.get("horizontal_fov", 60.0)
-        self.min_range = self.fov_config.get("min_range", 0.1)
-        self.max_range = self.fov_config.get("max_range", 1.0)
-        self.noise_level = self.sensing_config.get("noise_level", 0.0)
-        rospy.loginfo(
-            f"Camera params - FOV: {self.fov_degrees}°, Range: [{self.min_range}, {self.max_range}]m, Noise: {self.noise_level}"
-        )
+        # Get configuration parameters
+        self.camera_params = self._load_camera_parameters()
 
-        # Set device and initialize other attributes
-        self.device = device
-        self.temp_dir = tempfile.mkdtemp()
-        self.mesh = None
-        self.camera_frame_id = get_param("/perception/camera/frame", "tool0")
-        self.shader_type = get_param(
-            "/perception/camera/rendering/shader_type", "hard_phong"
-        )
+        # Initialize mesh storage
+        self.mesh_vertices = None
+        self.mesh_faces = None
 
-        # Initialize TF buffer and listener
-        rospy.loginfo("Initializing TF listener...")
+        # Cached mesh data (these don't change between frames)
+        self.face_vertices = None
+        self.face_centers = None
+        self.face_normals = None
+        self.face_normals_flipped = False
+
+        # Set up TF listener for camera transforms
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
-        # Initialize publishers - only pointcloud
-        rospy.loginfo("Setting up ROS publishers...")
+        # Set up point cloud publisher
         self.pointcloud_pub = rospy.Publisher(
             "camera/points", PointCloud2, queue_size=1
         )
 
-        # Create intrinsics
-        self.intrinsics = CameraIntrinsics.from_fov(
-            width=self.image_size[1],
-            height=self.image_size[0],
-            fov_degrees=self.fov_degrees,
+        # Load mesh from planning scene
+        self._load_mesh_from_scene()
+
+        # Pre-compute mesh data that doesn't change
+        self._precompute_mesh_data()
+
+        rospy.loginfo("SimulatedPerception initialized successfully")
+
+    def _select_optimal_device(self):
+        """Select the optimal device for computation."""
+        if torch.cuda.is_available():
+            return "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        else:
+            return "cpu"
+
+    def _load_camera_parameters(self):
+        """Load camera parameters from ROS parameter server."""
+        camera_frame = get_param("/perception/camera/frame", "tool0")
+
+        # Load constraint parameters
+        constraints = get_param("/perception/camera/constraints", {})
+        max_normal_angle = constraints.get("max_normal_angle", 30.0)
+
+        vertical_distance = constraints.get("vertical_distance", {})
+        min_vertical_distance = vertical_distance.get("min", 0.05)
+        max_vertical_distance = vertical_distance.get("max", 0.5)
+
+        horizontal_distance = constraints.get("horizontal_distance", {})
+        max_horizontal_distance = horizontal_distance.get("max", 0.3)
+
+        # Load sensing parameters
+        sensing = get_param("/perception/camera/sensing", {})
+        noise_config = sensing.get("noise", {})
+
+        # Get noise parameters with defaults
+        noise_horizontal = noise_config.get("horizontal", 0.0)
+        noise_vertical = noise_config.get("vertical", 0.0)
+        noise_distance_factor = noise_config.get("distance_factor", 0.0)
+
+        # Clamp noise levels to valid range
+        noise_horizontal = max(0.0, min(1.0, noise_horizontal))
+        noise_vertical = max(0.0, min(1.0, noise_vertical))
+        noise_distance_factor = max(0.0, min(1.0, noise_distance_factor))
+
+        # Create camera parameters
+        params = CameraParameters(
+            frame_id=camera_frame,
+            max_normal_angle=max_normal_angle,
+            min_vertical_distance=min_vertical_distance,
+            max_vertical_distance=max_vertical_distance,
+            max_horizontal_distance=max_horizontal_distance,
+            noise_horizontal=noise_horizontal,
+            noise_vertical=noise_vertical,
+            noise_distance_factor=noise_distance_factor,
         )
-        rospy.loginfo(
-            f"Camera intrinsics created: fx={self.intrinsics.fx}, fy={self.intrinsics.fy}, cx={self.intrinsics.cx}, cy={self.intrinsics.cy}"
-        )
 
-        # Rasterizer settings
-        self.raster_settings = RasterizationSettings(
-            image_size=self.image_size,
-            blur_radius=0.0,
-            faces_per_pixel=1,
-            bin_size=None,
-        )
-        rospy.loginfo(
-            f"Rasterizer settings configured with image size: {self.image_size}"
-        )
+        rospy.loginfo(f"Camera parameters loaded: {params}")
+        return params
 
-        # Create default lighting
-        self.lights = PointLights(
-            device=device,
-            location=[[0.0, 0.0, -3.0]],
-            ambient_color=((0.5, 0.5, 0.5),),
-            diffuse_color=((0.7, 0.7, 0.7),),
-            specular_color=((0.3, 0.3, 0.3),),
-        )
-        rospy.loginfo("Lighting configured")
-
-        # Blend parameters for rendering
-        self.blend_params = BlendParams(
-            sigma=1e-4, gamma=1e-4, background_color=(0.0, 0.0, 0.0)
-        )
-
-        # Create base camera with identity transform
-        rospy.loginfo("Creating base camera...")
-        self.base_camera = FoVPerspectiveCameras(
-            R=torch.eye(3, device=self.device).unsqueeze(0),
-            T=torch.zeros(3, device=self.device).unsqueeze(0),
-            fov=self.fov_degrees,
-            znear=self.min_range,
-            zfar=self.max_range,
-            device=self.device,
-        )
-
-        # Create renderer with base camera
-        rospy.loginfo("Creating renderer...")
-        self.renderer = self._create_renderer(self.base_camera)
-
-        rospy.loginfo("Loading mesh from scene...")
-        self.mesh = self._load_mesh_from_scene()
-        rospy.loginfo("SimulatedCamera initialization complete")
-
-        # Set signal handler for renderer
-        signal.signal(signal.SIGALRM, self._render_timeout_handler)
-
-    def _load_mesh_from_scene(self) -> Meshes:
-        """Load a mesh directly from the planning scene."""
+    def _load_mesh_from_scene(self):
+        """Load mesh data from the planning scene."""
         rospy.loginfo("Loading mesh from planning scene...")
 
         # Get object name from parameter server
-        mesh_config = rospy.get_param("/perception/mesh", {})
+        mesh_config = get_param("/perception/mesh", {})
         object_name = mesh_config.get("scene_object_name", "part")
         rospy.loginfo(f"Looking for object: {object_name}")
 
-        # Connect to planning scene and wait for connection
+        # Connect to planning scene
         scene = PlanningSceneInterface()
         rospy.sleep(1.0)
-        rospy.loginfo("Connected to planning scene")
 
         # Get object from scene
         scene_objects = scene.get_objects()
@@ -263,6 +154,7 @@ class SimulatedCamera:
 
         rospy.loginfo(f"Found objects in scene: {list(scene_objects.keys())}")
 
+        # Get the target object
         obj = scene_objects.get(object_name)
         if not obj:
             rospy.logerr(f"Required object '{object_name}' not found")
@@ -275,39 +167,36 @@ class SimulatedCamera:
             rospy.logerr(f"Object '{object_name}' has no mesh data")
             raise ValueError(f"Object '{object_name}' has no mesh data")
 
+        # Extract mesh data
         mesh_data = obj.meshes[0]
-        rospy.loginfo("Processing mesh vertices and faces...")
 
-        # Extract vertices and faces efficiently using list comprehension
-        verts = [[float(p.x), float(p.y), float(p.z)] for p in mesh_data.vertices]
+        # Extract vertices and faces
+        vertices = [[float(p.x), float(p.y), float(p.z)] for p in mesh_data.vertices]
         faces = [[int(idx) for idx in t.vertex_indices] for t in mesh_data.triangles]
 
-        rospy.loginfo(f"Mesh has {len(verts)} vertices and {len(faces)} faces")
+        # Check if faces exist
+        if not faces:
+            rospy.logerr(f"Object '{object_name}' has no triangle data")
+            raise ValueError(f"Object '{object_name}' has no triangle data")
 
-        if not verts or not faces:
-            rospy.logerr(f"Object '{object_name}' has empty mesh data")
-            raise ValueError(f"Object '{object_name}' has empty mesh data")
+        rospy.loginfo(f"Mesh has {len(vertices)} vertices and {len(faces)} faces")
 
-        # Convert to tensors
-        rospy.loginfo("Converting mesh data to tensors...")
-        verts_tensor = torch.tensor(verts, dtype=torch.float32, device=self.device)
+        if not vertices:
+            rospy.logerr(f"Object '{object_name}' has empty vertex data")
+            raise ValueError(f"Object '{object_name}' has empty vertex data")
+
+        # Convert to tensors on selected device
+        vertices_tensor = torch.tensor(
+            vertices, dtype=torch.float32, device=self.device
+        )
         faces_tensor = torch.tensor(faces, dtype=torch.int64, device=self.device)
 
-        # Create textures
-        verts_rgb = torch.full_like(verts_tensor, 0.7, device=self.device)
-        textures = TexturesVertex(verts_features=verts_rgb.unsqueeze(0))
-        rospy.loginfo("Created vertex textures")
-
-        # Get pose data - use the object's pose directly
+        # Apply mesh pose if available
         if hasattr(obj, "pose"):
             pose = obj.pose
-            translation = torch.tensor(
-                [pose.position.x, pose.position.y, pose.position.z],
-                dtype=torch.float32,
-                device=self.device,
-            )
+            translation = [pose.position.x, pose.position.y, pose.position.z]
 
-            # Convert quaternion to rotation matrix directly
+            # Convert quaternion to rotation matrix
             quat = [
                 pose.orientation.x,
                 pose.orientation.y,
@@ -318,144 +207,104 @@ class SimulatedCamera:
                 euler_matrix(*euler_from_quaternion(quat), "sxyz")[:3, :3],
                 dtype=np.float32,
             )
-        else:
-            rospy.logwarn(
-                f"Object '{object_name}' has no pose data, using identity pose"
+
+            # Apply transformation to vertices
+            if not np.allclose(rot_matrix, np.eye(3)):
+                rot_tensor = torch.tensor(
+                    rot_matrix, dtype=torch.float32, device=self.device
+                )
+                vertices_tensor = torch.matmul(
+                    vertices_tensor, rot_tensor.transpose(0, 1)
+                )
+
+            # Apply translation to vertices
+            translation_tensor = torch.tensor(
+                translation, dtype=torch.float32, device=self.device
             )
-            translation = torch.zeros(3, dtype=torch.float32, device=self.device)
-            rot_matrix = np.eye(3, dtype=np.float32)
+            vertices_tensor = vertices_tensor + translation_tensor
 
-        # Display actual translation values, not just zeros
-        rospy.loginfo(
-            f"Mesh translation: [{translation[0].item():.3f}, {translation[1].item():.3f}, {translation[2].item():.3f}]"
-        )
-        rospy.loginfo("Applied rotation matrix to mesh")
-
-        # Apply transformations efficiently
-        if not np.allclose(rot_matrix, np.eye(3)):
-            rot_tensor = torch.tensor(
-                rot_matrix, dtype=torch.float32, device=self.device
-            )
-            verts_tensor = torch.matmul(verts_tensor, rot_tensor.transpose(0, 1))
-
-        verts_tensor += translation
-        rospy.loginfo("Applied transformations to mesh vertices")
-
-        # Create and return mesh
-        mesh = Meshes(verts=[verts_tensor], faces=[faces_tensor], textures=textures)
-        rospy.loginfo("Successfully created PyTorch3D mesh")
-        return mesh
-
-    def _update_camera_transform(self, camera_transform: np.ndarray):
-        """Update the camera transform."""
-        rospy.loginfo("Updating camera transform...")
-        # Convert 4x4 numpy to 3x3 rotation + 3x1 translation for PyTorch3D camera
-        R = torch.tensor(camera_transform[:3, :3], device=self.device).unsqueeze(0)
-        T = torch.tensor(camera_transform[:3, 3], device=self.device).unsqueeze(0)
-
-        # Update camera parameters
-        self.base_camera.R = R
-        self.base_camera.T = T
-        rospy.loginfo(f"Camera transform updated - Translation: {T.cpu().numpy()}")
-
-    def _create_renderer(self, cameras: FoVPerspectiveCameras) -> MeshRenderer:
-        """Create a renderer with the specified shader type."""
-        rospy.loginfo(f"Creating renderer with {self.shader_type} shader...")
-        rasterizer = MeshRasterizer(
-            cameras=cameras, raster_settings=self.raster_settings
-        )
-
-        if self.shader_type == "hard_phong":
-            shader = HardPhongShader(
-                device=self.device, cameras=cameras, lights=self.lights
-            )
-        else:  # Default to soft_phong
-            shader = SoftPhongShader(
-                device=self.device,
-                cameras=cameras,
-                lights=self.lights,
-                blend_params=self.blend_params,
+            rospy.loginfo(
+                f"Applied mesh transform: position {translation}, rotation {quat}"
             )
 
-        renderer = MeshRenderer(rasterizer=rasterizer, shader=shader)
-        rospy.loginfo("Renderer created successfully")
-        return renderer
+        # Store mesh data
+        self.mesh_vertices = vertices_tensor
+        self.mesh_faces = faces_tensor
 
-    def _check_shutdown(self):
-        """Check if shutdown has been requested and raise exception if so"""
-        if rospy.is_shutdown() or shutdown_flag.is_set():
-            raise rospy.ROSInterruptException("Shutdown requested during rendering")
+        # Use all faces regardless of mesh size, no performance optimization
+        rospy.loginfo(f"Using all {len(faces)} faces for geometric filtering")
 
-    def _render_scene(self, camera_transform: np.ndarray):
-        """Render the scene from the given camera transform."""
-        rospy.loginfo("Rendering scene...")
+        rospy.loginfo("Mesh loaded successfully")
 
-        # Check for shutdown before starting rendering
-        self._check_shutdown()
+    def _precompute_mesh_data(self):
+        """Pre-compute mesh data that doesn't change between frames."""
+        if self.mesh_vertices is None or self.mesh_faces is None:
+            rospy.logwarn("Mesh data not available, cannot pre-compute mesh data")
+            return
 
-        # Update camera transform
-        self._update_camera_transform(camera_transform.astype(np.float32))
+        with torch.no_grad():
+            # Get vertices of each triangle in world space
+            self.face_vertices = self.mesh_vertices[self.mesh_faces]
 
-        # Render depth only
-        rospy.loginfo("Rendering depth image...")
-        start_time = time.time()
-        fragments = self.renderer.rasterizer(self.mesh)
-        render_time = time.time() - start_time
-        rospy.loginfo(f"Depth rendering completed in {render_time:.2f} seconds")
+            # Calculate face centers
+            self.face_centers = torch.mean(self.face_vertices, dim=1)
 
-        depth = fragments.zbuf[0, ..., 0].detach().cpu().numpy().astype(np.float32)
-        rospy.loginfo(
-            f"Raw depth shape: {depth.shape}, range: [{depth.min():.2f}, {depth.max():.2f}]"
-        )
+            # Calculate triangle normals in world space
+            v0, v1, v2 = (
+                self.face_vertices[:, 0],
+                self.face_vertices[:, 1],
+                self.face_vertices[:, 2],
+            )
+            normals = torch.cross(v1 - v0, v2 - v0)
 
-        # Process depth
-        mask = (depth > 0) & (depth < self.max_range)
-        depth = np.where(mask, depth, 0).astype(np.float32)
-        rospy.loginfo(f"Valid depth points: {np.sum(mask)}")
+            # Normalize normals
+            normal_lengths = torch.norm(normals, dim=1, keepdim=True)
+            # Avoid division by zero
+            normal_lengths[normal_lengths < 1e-10] = 1.0
+            normals = normals / normal_lengths
 
-        return depth
+            # Ensure normals point outward from the mesh
+            # Calculate the centroid of the mesh
+            mesh_centroid = torch.mean(self.mesh_vertices, dim=0)
 
-    def _render_timeout_handler(self, signum, frame):
-        """Handle timeouts in rendering."""
-        raise TimeoutError("Rendering operation timed out")
+            # Calculate vector from centroid to face center
+            centroid_to_face = self.face_centers - mesh_centroid
 
-    def create_pointcloud(self, depth: np.ndarray) -> np.ndarray:
-        """Create a point cloud from a depth image."""
-        rospy.loginfo("Creating point cloud from depth image...")
-        H, W = depth.shape
-        fx, fy = self.intrinsics.fx, self.intrinsics.fy
-        cx, cy = self.intrinsics.cx, self.intrinsics.cy
+            # Normalize these vectors
+            centroid_dist = torch.norm(centroid_to_face, dim=1, keepdim=True)
+            centroid_dist[centroid_dist < 1e-10] = 1.0
+            centroid_to_face = centroid_to_face / centroid_dist
 
-        # Generate pixel grid
-        x, y = np.meshgrid(np.arange(W), np.arange(H))
-        x = (x - cx) / fx
-        y = (y - cy) / fy
-        z = depth
+            # Dot product to check if normal and centroid-to-face have similar direction
+            normal_alignment = torch.sum(normals * centroid_to_face, dim=1)
 
-        # Convert to 3D points
-        X = x * z
-        Y = y * z
-        Z = z
+            # Flip normals that point inward (negative dot product with centroid-to-face)
+            flip_mask = normal_alignment < 0
+            normals[flip_mask] = -normals[flip_mask]
 
-        # Filter out invalid points (zero depth)
-        valid = z > 0
-        xyz = np.stack([X[valid], Y[valid], Z[valid]], axis=-1)
-        rospy.loginfo(f"Generated {len(xyz)} valid 3D points")
+            # Store the pre-computed normals
+            self.face_normals = normals
 
-        return xyz
+            # Log how many normals were flipped
+            flip_count = torch.sum(flip_mask).item()
+            rospy.loginfo(
+                f"Pre-computed {len(normals)} face normals, flipped {flip_count} to point outward"
+            )
+            self.face_normals_flipped = True
 
     def get_camera_transform(self):
-        """Get the 4x4 camera transform matrix in world coordinates."""
+        """Get the camera transform from TF."""
         try:
-            # Get transform from world to camera frame
+            # Look up the transform from world to camera frame
             transform = self.tf_buffer.lookup_transform(
-                "world", self.camera_frame_id, rospy.Time(0), rospy.Duration(0.01)
+                "world", self.camera_params.frame_id, rospy.Time(0), rospy.Duration(0.1)
             )
 
-            # Create 4x4 transform matrix directly from translation and quaternion
+            # Extract translation and rotation
             trans = transform.transform.translation
             rot = transform.transform.rotation
 
+            # Create transform matrix
             transform_matrix = np.eye(4, dtype=np.float32)
             transform_matrix[:3, :3] = np.array(
                 euler_matrix(*euler_from_quaternion([rot.x, rot.y, rot.z, rot.w]))[
@@ -465,9 +314,6 @@ class SimulatedCamera:
             )
             transform_matrix[:3, 3] = [trans.x, trans.y, trans.z]
 
-            rospy.loginfo(
-                f"Got camera transform from TF: {trans.x:.3f}, {trans.y:.3f}, {trans.z:.3f}"
-            )
             return transform_matrix
 
         except (
@@ -475,51 +321,229 @@ class SimulatedCamera:
             tf2_ros.ConnectivityException,
             tf2_ros.ExtrapolationException,
         ) as e:
-            rospy.logwarn(f"Could not get camera transform from TF: {e}")
+            rospy.logwarn_throttle(5.0, f"Could not get camera transform: {e}")
 
-            # Create a default transform
+            # Use a default transform (in front of the scene)
             transform_matrix = np.eye(4, dtype=np.float32)
-            # Position in front of the scene
-            transform_matrix[:3, 3] = np.array([1.0, 0.0, 1.0], dtype=np.float32)
-
+            transform_matrix[:3, 3] = [1.0, 0.0, 1.0]
             return transform_matrix
 
-    def publish_camera_data(self):
-        """Render and publish point cloud data based on current scene and camera position."""
-        if self.mesh is None:
-            rospy.logwarn("No mesh loaded, cannot publish point cloud")
-            return
+    def generate_pointcloud(self):
+        """Generate point cloud directly from mesh vertices through camera projection."""
+        if self.mesh_vertices is None or self.mesh_faces is None:
+            rospy.logwarn_throttle(
+                5.0, "Mesh data not available, cannot generate point cloud"
+            )
+            return None
 
-        # Check for shutdown flag at the beginning
-        if rospy.is_shutdown() or shutdown_flag.is_set():
-            return
+        # Check if we've pre-computed mesh data
+        if self.face_normals is None:
+            rospy.logwarn_throttle(5.0, "Mesh data not pre-computed, doing it now")
+            self._precompute_mesh_data()
 
-        rospy.loginfo("Publishing point cloud data...")
+        # Record start time for performance monitoring
+        start_time = time.time()
 
+        # Get camera transform
+        camera_transform = self.get_camera_transform()
+        camera_transform_tensor = torch.tensor(
+            camera_transform, dtype=torch.float32, device=self.device
+        )
+
+        # Camera Z axis (forward direction) in world coordinates
+        camera_forward = camera_transform[:3, 2]  # Third column is Z axis
+
+        # Camera forward vector as tensor
+        camera_forward_tensor = torch.tensor(
+            camera_forward, dtype=torch.float32, device=self.device
+        )
+
+        # Camera X and Y axes for noise application
+        camera_x = camera_transform[:3, 0]  # First column is X axis
+        camera_y = camera_transform[:3, 1]  # Second column is Y axis
+        camera_z = camera_transform[:3, 2]  # Third column is Z axis
+
+        # Convert to tensors once
+        camera_x_tensor = torch.tensor(
+            camera_x, dtype=torch.float32, device=self.device
+        )
+        camera_y_tensor = torch.tensor(
+            camera_y, dtype=torch.float32, device=self.device
+        )
+        camera_z_tensor = torch.tensor(
+            camera_z, dtype=torch.float32, device=self.device
+        )
+
+        with torch.no_grad():
+            # Now that normals are correctly oriented, calculate angle with camera
+            normal_dot_view = torch.abs(
+                torch.matmul(self.face_normals, camera_forward_tensor)
+            )
+            # Convert to angle in degrees
+            normal_angles = (
+                torch.acos(torch.clamp(normal_dot_view, -1.0, 1.0)) * 180.0 / np.pi
+            )
+
+            # Filter by maximum normal angle
+            max_angle_rad = self.camera_params.max_normal_angle
+            visible_faces = normal_angles <= max_angle_rad
+
+            # Get inverse of camera transform (camera_T_world)
+            camera_transform_inv = torch.inverse(camera_transform_tensor)
+
+            # For each visible face, process its vertices
+            visible_face_indices = torch.nonzero(visible_faces, as_tuple=True)[0]
+
+            if len(visible_face_indices) == 0:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "No faces visible from current camera view based on normal angle",
+                )
+                return np.array([], dtype=np.float32).reshape(0, 3)
+
+            # Get vertices of visible faces
+            visible_face_vertices = self.face_vertices[visible_face_indices]
+
+            # Flatten to get all vertices from visible faces (may include duplicates)
+            vertices = visible_face_vertices.reshape(-1, 3)
+
+            # Transform vertices to camera space - more efficient batch operation
+            ones = torch.ones(
+                (vertices.shape[0], 1),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            vertices_homogeneous = torch.cat([vertices, ones], dim=1)
+
+            # More efficient matrix multiplication
+            vertices_camera = torch.matmul(vertices_homogeneous, camera_transform_inv.T)
+
+            # Get camera space coordinates
+            x, y, z = (
+                vertices_camera[:, 0],
+                vertices_camera[:, 1],
+                vertices_camera[:, 2],
+            )
+
+            # Calculate vertical distance (along Z axis)
+            vertical_distance = z
+
+            # Calculate horizontal distance (perpendicular to Z axis)
+            horizontal_distance = torch.sqrt(x * x + y * y)
+
+            # Apply constraints
+            in_vertical_range = (
+                vertical_distance >= self.camera_params.min_vertical_distance
+            ) & (vertical_distance <= self.camera_params.max_vertical_distance)
+
+            in_horizontal_range = (
+                horizontal_distance <= self.camera_params.max_horizontal_distance
+            )
+
+            # Combine constraints
+            valid_vertices = in_vertical_range & in_horizontal_range
+
+            if torch.sum(valid_vertices) == 0:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "No points visible from current camera view based on distance constraints",
+                )
+                return np.array([], dtype=np.float32).reshape(0, 3)
+
+            # Get filtered world space points
+            valid_world_points = vertices[valid_vertices]
+
+            # Also get camera space coordinates of valid points
+            valid_camera_points = vertices_camera[valid_vertices]
+
+            # Log filtered results with throttling
+            rospy.logdebug_throttle(
+                1.0,
+                f"Filtered points: {len(valid_world_points)} of {len(vertices)} | "
+                f"Faces: {len(visible_face_indices)} of {len(self.mesh_faces)}",
+            )
+
+            # Add Gaussian noise to the point cloud if noise parameters > 0
+            if (
+                self.camera_params.noise_horizontal > 0
+                or self.camera_params.noise_vertical > 0
+                or self.camera_params.noise_distance_factor > 0
+            ):
+
+                # Get point distances for distance-dependent noise scaling
+                distances = torch.norm(valid_camera_points[:, :3], dim=1)
+                distance_scale = (
+                    1.0 + distances * self.camera_params.noise_distance_factor
+                )
+
+                # Create noise tensors
+                noise = torch.zeros_like(valid_world_points)
+
+                # Generate horizontal noise (in X and Y) - vectorized
+                if self.camera_params.noise_horizontal > 0:
+                    # Generate random noise along camera X and Y directions
+                    x_noise = (
+                        torch.randn(valid_world_points.size(0), device=self.device)
+                        * self.camera_params.noise_horizontal
+                    )
+                    y_noise = (
+                        torch.randn(valid_world_points.size(0), device=self.device)
+                        * self.camera_params.noise_horizontal
+                    )
+
+                    # Scale by distance factor
+                    x_noise = x_noise * distance_scale
+                    y_noise = y_noise * distance_scale
+
+                    # Vectorized noise application
+                    noise += torch.einsum("i,j->ij", x_noise, camera_x_tensor)
+                    noise += torch.einsum("i,j->ij", y_noise, camera_y_tensor)
+
+                # Generate vertical noise (along camera Z) - vectorized
+                if self.camera_params.noise_vertical > 0:
+                    # Generate random noise along camera Z direction
+                    z_noise = (
+                        torch.randn(valid_world_points.size(0), device=self.device)
+                        * self.camera_params.noise_vertical
+                    )
+
+                    # Scale by distance factor
+                    z_noise = z_noise * distance_scale
+
+                    # Vectorized noise application
+                    noise += torch.einsum("i,j->ij", z_noise, camera_z_tensor)
+
+                # Apply combined noise
+                valid_world_points = valid_world_points + noise
+
+                # Log noise info with throttling
+                rospy.logdebug_throttle(
+                    1.0,
+                    f"Added noise: h={self.camera_params.noise_horizontal:.4f}, "
+                    f"v={self.camera_params.noise_vertical:.4f}, "
+                    f"scale={self.camera_params.noise_distance_factor:.2f}",
+                )
+
+            # Convert to numpy only at the end
+            pointcloud = valid_world_points.cpu().numpy()
+
+            # Log performance metrics with throttling
+            elapsed = time.time() - start_time
+            rospy.logdebug_throttle(
+                1.0, f"Point cloud generation took {elapsed:.3f} seconds"
+            )
+
+            return pointcloud
+
+    def publish_pointcloud(self):
+        """Generate and publish the point cloud."""
         try:
-            # Get camera transform and render scene
-            camera_transform = self.get_camera_transform()
+            # Generate point cloud
+            pointcloud = self.generate_pointcloud()
 
-            # Set timeout for rendering (10 seconds maximum)
-            signal.alarm(10)
-            try:
-                depth = self._render_scene(camera_transform)
-                # Cancel the alarm if rendering completes
-                signal.alarm(0)
-            except Exception as e:
-                signal.alarm(0)  # Make sure to cancel alarm
-                rospy.logerr(f"Error in rendering: {e}")
+            if pointcloud is None or len(pointcloud) == 0:
+                rospy.logwarn_throttle(5.0, "No points to publish")
                 return
-
-            # Create point cloud from depth data
-            rospy.loginfo("Creating point cloud...")
-            pointcloud = self.create_pointcloud(depth)
-
-            if len(pointcloud) == 0:
-                rospy.logwarn("No valid points in point cloud, skipping publication")
-                return
-
-            rospy.loginfo(f"Point cloud created with {len(pointcloud)} points")
 
             # Create point cloud message
             fields = [
@@ -528,100 +552,91 @@ class SimulatedCamera:
                 PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
             ]
 
-            # Create point cloud message with consistent frame ID and timestamp
+            # Create message with world frame
             cloud_msg = pc2.create_cloud(
-                std_msgs.msg.Header(
-                    frame_id=self.camera_frame_id, stamp=rospy.Time.now()
-                ),
+                std_msgs.msg.Header(frame_id="world", stamp=rospy.Time.now()),
                 fields,
                 pointcloud,
             )
 
+            # Publish message
             self.pointcloud_pub.publish(cloud_msg)
-            rospy.loginfo("Point cloud published successfully")
+
+            # Log with throttling
+            rospy.logdebug_throttle(
+                1.0, f"Published point cloud with {len(pointcloud)} points"
+            )
 
         except Exception as e:
-            rospy.logerr(f"Error in publish_camera_data: {e}")
+            rospy.logerr(f"Error publishing point cloud: {e}")
 
     def cleanup(self):
         """Clean up resources."""
-        rospy.loginfo("Cleaning up SimulatedCamera resources...")
-        # Clear CUDA cache if using CUDA
+        rospy.loginfo("Cleaning up resources...")
+        # Clear GPU memory if using CUDA or MPS
         if self.device == "cuda":
             torch.cuda.empty_cache()
-        # Clear MPS cache if using MPS
-        elif self.device == "mps":
+        elif self.device == "mps" and hasattr(torch.mps, "empty_cache"):
             torch.mps.empty_cache()
 
-        # Delete temporary directory
-        if hasattr(self, "temp_dir") and os.path.exists(self.temp_dir):
-            import shutil
 
-            rospy.loginfo("Removing temporary directory...")
-            shutil.rmtree(self.temp_dir)
-
-    def __del__(self):
-        """Destructor to ensure cleanup."""
-        self.cleanup()
-
-
-def run_camera_node():
-    """Run the simulated camera as a ROS node."""
+def run_node():
+    """Run the point cloud generator node."""
     # Initialize ROS node
-    rospy.init_node("simulated_rgbd_camera")
+    rospy.init_node("simulated_perception", disable_signals=False)
 
     # Get rate parameter
-    rate_hz = get_param("/perception/camera/sensing/frame_rate", 30)  # Default to 30Hz
+    rate_hz = get_param("/perception/camera/sensing/frame_rate", 10)  # Default to 10Hz
     rospy.loginfo(f"Publishing at {rate_hz} Hz")
 
-    camera = None
+    generator = None
     try:
-        # Create camera and load configuration
-        camera = SimulatedCamera()
+        # Create generator
+        generator = SimulatedPerception()
+
         # Set update rate
         rate = rospy.Rate(rate_hz)
-        rospy.loginfo("Simulated RGBD camera node is running")
 
-        while not rospy.is_shutdown() and not shutdown_flag.is_set():
+        rospy.loginfo("Simulated perception is running")
+
+        # Main loop - use ROS's built-in shutdown handling
+        while not rospy.is_shutdown():
             try:
-                # Publish camera data with timeout protection
-                camera.publish_camera_data()
+                # Record frame start time
+                frame_start = time.time()
 
-                # Log occasionally to show activity
-                if rospy.get_time() % 5 < 0.1:  # Log every ~5 seconds
-                    rospy.loginfo("Publishing camera data...")
+                # Generate and publish point cloud
+                generator.publish_pointcloud()
+
+                # Calculate actual processing time
+                processing_time = time.time() - frame_start
+
+                # Log if processing takes too long
+                if processing_time > 1.0 / rate_hz:
+                    rospy.logwarn_throttle(
+                        5.0,
+                        f"Frame processing time ({processing_time:.3f}s) exceeds target frame time ({1.0/rate_hz:.3f}s)",
+                    )
 
                 # Sleep to maintain rate
                 rate.sleep()
             except rospy.ROSInterruptException:
-                rospy.loginfo("Interrupted, shutting down camera node")
+                rospy.loginfo("Interrupted, shutting down")
                 break
             except Exception as e:
-                rospy.logerr(f"Error in camera node: {e}")
+                rospy.logerr(f"Error in main loop: {e}")
                 time.sleep(0.1)  # Short sleep on error
-    except rospy.ROSInterruptException:
-        rospy.loginfo("Interrupted during initialization, exiting")
     except Exception as e:
-        rospy.logerr(f"Error initializing camera: {e}")
+        rospy.logerr(f"Error initializing point cloud generator: {e}")
     finally:
-        if camera:
-            rospy.loginfo("Cleaning up camera resources...")
-            camera.cleanup()
-        rospy.loginfo("Camera node shutting down")
-        # Clear all alarms to prevent hanging
-        signal.alarm(0)
+        if generator:
+            generator.cleanup()
+        rospy.loginfo("Node shutting down")
 
 
 if __name__ == "__main__":
-    # Set up exception handling for the entire script
+    # Run the node with standard ROS exception handling
     try:
-        run_camera_node()
+        run_node()
     except rospy.ROSInterruptException:
-        rospy.loginfo("Interrupted by user, shutting down")
-    except KeyboardInterrupt:
-        rospy.loginfo("Keyboard interrupt received, shutting down")
-    except Exception as e:
-        rospy.logerr(f"Unhandled exception: {e}")
-    finally:
-        cleanup_handler()
-        sys.exit(0)
+        pass
