@@ -42,12 +42,42 @@ import sys
 import time
 import signal
 import threading
+import atexit
 
 # Internal
 
 from neural_engine.utils import bootstrap, get_param
 
 bootstrap()
+
+# Global flag for clean shutdown
+shutdown_flag = threading.Event()
+
+
+def cleanup_handler():
+    """Cleanup handler to ensure proper shutdown"""
+    rospy.loginfo("Cleaning up resources...")
+    shutdown_flag.set()
+    # Clear CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    # Clear MPS cache if available
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
+def signal_handler(signum, frame):
+    """Signal handler for graceful shutdown"""
+    rospy.loginfo(f"Received signal {signum}")
+    cleanup_handler()
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+# Register cleanup on normal exit
+atexit.register(cleanup_handler)
 
 
 @dataclass
@@ -122,15 +152,25 @@ class SimulatedCamera:
         ),
     ):
         """Initialize a simulated camera."""
+        rospy.loginfo("Initializing SimulatedCamera...")
+        rospy.loginfo(f"Using device: {device}")
+
         # Get camera configuration from parameter server
         self.fov_config = get_param("/perception/camera/field_of_view")
         self.sensing_config = get_param("/perception/camera/sensing")
         self.image_size = get_param("/perception/camera/image_size")
+        rospy.loginfo(
+            f"Camera config - FOV: {self.fov_config}, Image size: {self.image_size}"
+        )
+
         # Configure from parameters
         self.fov_degrees = self.fov_config.get("horizontal_fov", 60.0)
         self.min_range = self.fov_config.get("min_range", 0.1)
         self.max_range = self.fov_config.get("max_range", 1.0)
         self.noise_level = self.sensing_config.get("noise_level", 0.0)
+        rospy.loginfo(
+            f"Camera params - FOV: {self.fov_degrees}°, Range: [{self.min_range}, {self.max_range}]m, Noise: {self.noise_level}"
+        )
 
         # Set device and initialize other attributes
         self.device = device
@@ -142,12 +182,16 @@ class SimulatedCamera:
         self.shader_type = rospy.get_param(
             "/perception/camera/rendering/shader_type", "soft_phong"
         )
+        rospy.loginfo(f"Using shader type: {self.shader_type}")
 
         # Create intrinsics
         self.intrinsics = CameraIntrinsics.from_fov(
             width=self.image_size[1],
             height=self.image_size[0],
             fov_degrees=self.fov_degrees,
+        )
+        rospy.loginfo(
+            f"Camera intrinsics created: fx={self.intrinsics.fx}, fy={self.intrinsics.fy}, cx={self.intrinsics.cx}, cy={self.intrinsics.cy}"
         )
 
         # Rasterizer settings
@@ -156,6 +200,9 @@ class SimulatedCamera:
             blur_radius=0.0,
             faces_per_pixel=1,
             bin_size=None,
+        )
+        rospy.loginfo(
+            f"Rasterizer settings configured with image size: {self.image_size}"
         )
 
         # Create default lighting
@@ -166,6 +213,7 @@ class SimulatedCamera:
             diffuse_color=((0.7, 0.7, 0.7),),
             specular_color=((0.3, 0.3, 0.3),),
         )
+        rospy.loginfo("Lighting configured")
 
         # Blend parameters for rendering
         self.blend_params = BlendParams(
@@ -173,10 +221,12 @@ class SimulatedCamera:
         )
 
         # Initialize TF buffer and listener
+        rospy.loginfo("Initializing TF listener...")
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
         # Initialize publishers
+        rospy.loginfo("Setting up ROS publishers...")
         self.rgb_pub = rospy.Publisher("camera/rgb/image_raw", Image, queue_size=1)
         self.rgb_info_pub = rospy.Publisher(
             "camera/rgb/camera_info", CameraInfo, queue_size=1
@@ -190,6 +240,7 @@ class SimulatedCamera:
         )
 
         # Create base camera with identity transform
+        rospy.loginfo("Creating base camera...")
         self.base_camera = FoVPerspectiveCameras(
             R=torch.eye(3, device=self.device).unsqueeze(0),
             T=torch.zeros(3, device=self.device).unsqueeze(0),
@@ -200,54 +251,73 @@ class SimulatedCamera:
         )
 
         # Create renderer with base camera
+        rospy.loginfo("Creating renderer...")
         self.renderer = self._create_renderer(self.base_camera)
 
+        rospy.loginfo("Loading mesh from scene...")
         self.mesh = self._load_mesh_from_scene()
+        rospy.loginfo("SimulatedCamera initialization complete")
 
     def _load_mesh_from_scene(self) -> Meshes:
         """Load a mesh directly from the planning scene."""
+        rospy.loginfo("Loading mesh from planning scene...")
+
         # Get object name from parameter server
         mesh_config = rospy.get_param("/perception/mesh", {})
         object_name = mesh_config.get("scene_object_name", "part")
+        rospy.loginfo(f"Looking for object: {object_name}")
 
         # Connect to planning scene and wait for connection
         scene = PlanningSceneInterface()
         rospy.sleep(1.0)
+        rospy.loginfo("Connected to planning scene")
 
         # Get object from scene
         scene_objects = scene.get_objects()
         if not scene_objects:
+            rospy.logerr("No objects found in planning scene")
             raise ValueError("No objects found in planning scene")
+
+        rospy.loginfo(f"Found objects in scene: {list(scene_objects.keys())}")
 
         obj = scene_objects.get(object_name)
         if not obj:
+            rospy.logerr(f"Required object '{object_name}' not found")
             raise ValueError(
                 f"Required object '{object_name}' not found. Available: {', '.join(scene_objects.keys())}"
             )
 
         # Validate mesh data exists
         if not getattr(obj, "meshes", None):
+            rospy.logerr(f"Object '{object_name}' has no mesh data")
             raise ValueError(f"Object '{object_name}' has no mesh data")
 
         mesh_data = obj.meshes[0]
+        rospy.loginfo("Processing mesh vertices and faces...")
 
         # Extract vertices and faces efficiently using list comprehension
         verts = [[float(p.x), float(p.y), float(p.z)] for p in mesh_data.vertices]
         faces = [[int(idx) for idx in t.vertex_indices] for t in mesh_data.triangles]
 
+        rospy.loginfo(f"Mesh has {len(verts)} vertices and {len(faces)} faces")
+
         if not verts or not faces:
+            rospy.logerr(f"Object '{object_name}' has empty mesh data")
             raise ValueError(f"Object '{object_name}' has empty mesh data")
 
         # Convert to tensors
+        rospy.loginfo("Converting mesh data to tensors...")
         verts_tensor = torch.tensor(verts, dtype=torch.float32, device=self.device)
         faces_tensor = torch.tensor(faces, dtype=torch.int64, device=self.device)
 
         # Create textures
         verts_rgb = torch.full_like(verts_tensor, 0.7, device=self.device)
         textures = TexturesVertex(verts_features=verts_rgb.unsqueeze(0))
+        rospy.loginfo("Created vertex textures")
 
         # Get pose data
         if not getattr(obj, "mesh_poses", None):
+            rospy.logerr(f"Object '{object_name}' has no mesh pose data")
             raise ValueError(f"Object '{object_name}' has no mesh pose data")
 
         pose = obj.mesh_poses[0]
@@ -255,6 +325,9 @@ class SimulatedCamera:
             [pose.position.x, pose.position.y, pose.position.z],
             dtype=torch.float32,
             device=self.device,
+        )
+        rospy.loginfo(
+            f"Mesh translation: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]"
         )
 
         # Convert quaternion to rotation matrix directly
@@ -267,6 +340,7 @@ class SimulatedCamera:
         rot_matrix = np.array(
             euler_matrix(*euler_from_quaternion(quat), "sxyz")[:3, :3], dtype=np.float32
         )
+        rospy.loginfo("Applied rotation matrix to mesh")
 
         # Apply transformations efficiently
         if not np.allclose(rot_matrix, np.eye(3)):
@@ -276,12 +350,16 @@ class SimulatedCamera:
             verts_tensor = torch.matmul(verts_tensor, rot_tensor.transpose(0, 1))
 
         verts_tensor += translation
+        rospy.loginfo("Applied transformations to mesh vertices")
 
         # Create and return mesh
-        return Meshes(verts=[verts_tensor], faces=[faces_tensor], textures=textures)
+        mesh = Meshes(verts=[verts_tensor], faces=[faces_tensor], textures=textures)
+        rospy.loginfo("Successfully created PyTorch3D mesh")
+        return mesh
 
     def _update_camera_transform(self, camera_transform: np.ndarray):
         """Update the camera transform."""
+        rospy.loginfo("Updating camera transform...")
         # Convert 4x4 numpy to 3x3 rotation + 3x1 translation for PyTorch3D camera
         R = torch.tensor(camera_transform[:3, :3], device=self.device).unsqueeze(0)
         T = torch.tensor(camera_transform[:3, 3], device=self.device).unsqueeze(0)
@@ -289,9 +367,11 @@ class SimulatedCamera:
         # Update camera parameters
         self.base_camera.R = R
         self.base_camera.T = T
+        rospy.loginfo(f"Camera transform updated - Translation: {T.cpu().numpy()}")
 
     def _create_renderer(self, cameras: FoVPerspectiveCameras) -> MeshRenderer:
         """Create a renderer with the specified shader type."""
+        rospy.loginfo(f"Creating renderer with {self.shader_type} shader...")
         rasterizer = MeshRasterizer(
             cameras=cameras, raster_settings=self.raster_settings
         )
@@ -308,32 +388,49 @@ class SimulatedCamera:
                 blend_params=self.blend_params,
             )
 
-        return MeshRenderer(rasterizer=rasterizer, shader=shader)
+        renderer = MeshRenderer(rasterizer=rasterizer, shader=shader)
+        rospy.loginfo("Renderer created successfully")
+        return renderer
 
     def _render_scene(self, camera_transform: np.ndarray):
         """Render the scene from the given camera transform."""
+        rospy.loginfo("Rendering scene...")
+
         # Update camera transform
         self._update_camera_transform(camera_transform.astype(np.float32))
 
         # Render RGB
+        rospy.loginfo("Rendering RGB image...")
         rgba = self.renderer(self.mesh)
         rgb = rgba[0, ..., :3].detach().cpu().numpy().astype(np.float32)
+        rospy.loginfo(
+            f"RGB image shape: {rgb.shape}, range: [{rgb.min():.2f}, {rgb.max():.2f}]"
+        )
 
         # Render depth
+        rospy.loginfo("Rendering depth image...")
         fragments = self.renderer.rasterizer(self.mesh)
         depth = fragments.zbuf[0, ..., 0].detach().cpu().numpy().astype(np.float32)
+        rospy.loginfo(
+            f"Raw depth shape: {depth.shape}, range: [{depth.min():.2f}, {depth.max():.2f}]"
+        )
 
         # Process depth
         mask = (depth > 0) & (depth < self.max_range)
         depth = np.where(mask, depth, 0).astype(np.float32)
+        rospy.loginfo(f"Valid depth points: {np.sum(mask)}")
 
         if self.noise_level > 0:
+            rospy.loginfo(f"Adding noise with level {self.noise_level}")
             noise = np.random.normal(0, self.noise_level, depth.shape).astype(
                 np.float32
             )
             depth[mask] += noise[mask]
             depth = np.where((depth > 0) & (depth < self.max_range), depth, 0).astype(
                 np.float32
+            )
+            rospy.loginfo(
+                f"Depth range after noise: [{depth.min():.2f}, {depth.max():.2f}]"
             )
 
         return rgb, depth
@@ -345,6 +442,7 @@ class SimulatedCamera:
         rgb: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Create a point cloud from a depth image."""
+        rospy.loginfo("Creating point cloud from depth image...")
         H, W = depth.shape
         fx, fy = self.intrinsics.fx, self.intrinsics.fy
         cx, cy = self.intrinsics.cx, self.intrinsics.cy
@@ -363,9 +461,11 @@ class SimulatedCamera:
         # Filter out invalid points (zero depth)
         valid = z > 0
         xyz = np.stack([X[valid], Y[valid], Z[valid]], axis=-1)
+        rospy.loginfo(f"Generated {len(xyz)} valid 3D points")
 
         if return_colors and rgb is not None:
             colors = rgb[valid]
+            rospy.loginfo(f"Added colors to point cloud")
             return xyz, colors
 
         return xyz
@@ -391,7 +491,7 @@ class SimulatedCamera:
             )
             transform_matrix[:3, 3] = [trans.x, trans.y, trans.z]
 
-            rospy.logdebug(
+            rospy.loginfo(
                 f"Got camera transform from TF: {trans.x:.3f}, {trans.y:.3f}, {trans.z:.3f}"
             )
             return transform_matrix
@@ -416,9 +516,12 @@ class SimulatedCamera:
             rospy.logwarn("No mesh loaded, cannot publish camera data")
             return
 
+        rospy.loginfo("Publishing camera data...")
+
         # Get camera transform and render scene
         camera_transform = self.get_camera_transform()
         rgb, depth = self._render_scene(camera_transform)
+        rospy.loginfo("Scene rendered successfully")
 
         # Get current timestamp
         timestamp = rospy.Time.now()
@@ -428,6 +531,7 @@ class SimulatedCamera:
         camera_info.header.stamp = timestamp
 
         # Publish RGB image
+        rospy.loginfo("Publishing RGB image...")
         rgb_msg = self.bridge.cv2_to_imgmsg(
             cv2.cvtColor((rgb * 255).astype(np.uint8), cv2.COLOR_RGB2BGR),
             encoding="bgr8",
@@ -438,6 +542,7 @@ class SimulatedCamera:
         self.rgb_info_pub.publish(camera_info)
 
         # Publish depth image
+        rospy.loginfo("Publishing depth image...")
         depth_msg = self.bridge.cv2_to_imgmsg(
             depth.astype(np.float32), encoding="32FC1"
         )
@@ -447,7 +552,9 @@ class SimulatedCamera:
         self.depth_info_pub.publish(camera_info)
 
         # Create and publish point cloud
+        rospy.loginfo("Creating point cloud...")
         pointcloud, colors = self.create_pointcloud(depth, return_colors=True, rgb=rgb)
+        rospy.loginfo(f"Point cloud created with {len(pointcloud)} points")
 
         fields = [
             PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
@@ -457,6 +564,7 @@ class SimulatedCamera:
         ]
 
         if len(pointcloud) > 0:
+            rospy.loginfo("Packing RGB colors for point cloud...")
             # Pack RGB into a single float32
             rgb_packed = np.zeros(len(colors), dtype=np.float32)
             for i in range(len(colors)):
@@ -467,7 +575,9 @@ class SimulatedCamera:
                 )[0]
 
             cloud_points = np.hstack([pointcloud, rgb_packed.reshape(-1, 1)])
+            rospy.loginfo(f"Point cloud data shape: {cloud_points.shape}")
         else:
+            rospy.logwarn("No valid points in point cloud, creating dummy point")
             cloud_points = np.array([[0.0, 0.0, 1000.0, 0.0]], dtype=np.float32)
 
         cloud_msg = pc2.create_cloud(
@@ -475,14 +585,29 @@ class SimulatedCamera:
             fields,
             cloud_points,
         )
+        rospy.loginfo("Publishing point cloud...")
         self.pointcloud_pub.publish(cloud_msg)
 
-    def __del__(self):
-        """Clean up temporary files."""
-        import shutil
+    def cleanup(self):
+        """Clean up resources."""
+        rospy.loginfo("Cleaning up SimulatedCamera resources...")
+        # Clear CUDA cache if using CUDA
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+        # Clear MPS cache if using MPS
+        elif self.device == "mps":
+            torch.mps.empty_cache()
 
+        # Delete temporary directory
         if hasattr(self, "temp_dir") and os.path.exists(self.temp_dir):
+            import shutil
+
+            rospy.loginfo("Removing temporary directory...")
             shutil.rmtree(self.temp_dir)
+
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        self.cleanup()
 
 
 def run_camera_node():
@@ -494,6 +619,7 @@ def run_camera_node():
     rate_hz = get_param("/perception/camera/sensing/frame_rate", 10)
     rospy.loginfo(f"Publishing at {rate_hz} Hz")
 
+    camera = None
     try:
         # Create camera and load configuration
         camera = SimulatedCamera()
@@ -501,7 +627,7 @@ def run_camera_node():
         rate = rospy.Rate(rate_hz)
         rospy.loginfo("Simulated RGBD camera node is running")
 
-        while not rospy.is_shutdown():
+        while not rospy.is_shutdown() and not shutdown_flag.is_set():
             try:
                 # Publish camera data
                 camera.publish_camera_data()
@@ -520,6 +646,9 @@ def run_camera_node():
     except Exception as e:
         rospy.logerr(f"Error initializing camera: {e}")
     finally:
+        if camera:
+            rospy.loginfo("Cleaning up camera resources...")
+            camera.cleanup()
         rospy.loginfo("Camera node shutting down")
 
 
@@ -534,5 +663,5 @@ if __name__ == "__main__":
     except Exception as e:
         rospy.logerr(f"Unhandled exception: {e}")
     finally:
-        # Ensure we exit cleanly
+        cleanup_handler()
         sys.exit(0)
