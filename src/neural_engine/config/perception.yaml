@@ -6,8 +6,8 @@ mesh:
 
 # Camera configuration
 camera:
-  # Image size - reduced resolution for faster processing
-  image_size: [240, 320]
+  # Image size - minimal resolution for point cloud generation
+  image_size: [120, 160]
 
   # Frame settings
   frame: "tool0"
@@ -18,16 +18,12 @@ camera:
     vertical_fov: 45.0
     min_range: 0.1
     max_range: 0.8
-    noise_level: 0.0
   
   # Sensing settings
   sensing:
-    frame_rate: 10  # Reduced frame rate to reduce CPU load
-    noise_level: 0.0  # Removed noise for faster processing
-    publish_rgb: false  # Disable RGB publishing to focus on depth
-    publish_depth: true
-    publish_point_cloud: true
+    frame_rate: 1  # Minimal frame rate for point cloud generation
+    noise_level: 0.0
   
   # Rendering settings
   rendering:
-    shader_type: "hard_phong"  # Using hard_phong instead of soft_phong for speed
+    shader_type: "hard_phong"  # Using hard_phong for speed

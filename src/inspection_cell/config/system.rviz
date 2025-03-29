@@ -3,8 +3,7 @@ Panels:
     Help Height: 84
     Name: Displays
     Property Tree Widget:
-      Expanded:
-        - /MotionPlanning1/Planning Metrics1
+      Expanded: ~
       Splitter Ratio: 0.5170649886131287
     Tree Height: 375
   - Class: rviz/Help

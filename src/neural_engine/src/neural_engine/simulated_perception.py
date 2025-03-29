@@ -5,12 +5,8 @@
 import torch
 import numpy as np
 import os
-import rospkg
 import rospy
-import struct
 from dataclasses import dataclass
-from typing import Tuple, List, Optional, Dict
-from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.renderer import (
     FoVPerspectiveCameras,
     RasterizationSettings,
@@ -25,17 +21,12 @@ from pytorch3d.renderer import (
 from pytorch3d.structures import Meshes
 from tf.transformations import (
     euler_matrix,
-    quaternion_from_euler,
     euler_from_quaternion,
 )
-import matplotlib.pyplot as plt
 import tempfile
 from moveit_commander import PlanningSceneInterface
 import tf2_ros
-import geometry_msgs.msg
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
-import cv2
-from cv_bridge import CvBridge
+from sensor_msgs.msg import CameraInfo, PointCloud2, PointField
 import std_msgs.msg
 import sensor_msgs.point_cloud2 as pc2
 import sys
@@ -177,17 +168,20 @@ class SimulatedCamera:
         self.temp_dir = tempfile.mkdtemp()
         self.mesh = None
         self.camera_frame_id = get_param("/perception/camera/frame", "tool0")
-        self.bridge = CvBridge()
-
-        # Add instance variables for threaded rendering
-        self.rendered_rgba = None
-        self.rendered_depth = None
-        self.render_lock = threading.Lock()
-
-        self.shader_type = rospy.get_param(
-            "/perception/camera/rendering/shader_type", "soft_phong"
+        self.shader_type = get_param(
+            "/perception/camera/rendering/shader_type", "hard_phong"
         )
-        rospy.loginfo(f"Using shader type: {self.shader_type}")
+
+        # Initialize TF buffer and listener
+        rospy.loginfo("Initializing TF listener...")
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
+        # Initialize publishers - only pointcloud
+        rospy.loginfo("Setting up ROS publishers...")
+        self.pointcloud_pub = rospy.Publisher(
+            "camera/points", PointCloud2, queue_size=1
+        )
 
         # Create intrinsics
         self.intrinsics = CameraIntrinsics.from_fov(
@@ -223,25 +217,6 @@ class SimulatedCamera:
         # Blend parameters for rendering
         self.blend_params = BlendParams(
             sigma=1e-4, gamma=1e-4, background_color=(0.0, 0.0, 0.0)
-        )
-
-        # Initialize TF buffer and listener
-        rospy.loginfo("Initializing TF listener...")
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
-
-        # Initialize publishers
-        rospy.loginfo("Setting up ROS publishers...")
-        self.rgb_pub = rospy.Publisher("camera/rgb/image_raw", Image, queue_size=1)
-        self.rgb_info_pub = rospy.Publisher(
-            "camera/rgb/camera_info", CameraInfo, queue_size=1
-        )
-        self.depth_pub = rospy.Publisher("camera/depth/image_raw", Image, queue_size=1)
-        self.depth_info_pub = rospy.Publisher(
-            "camera/depth/camera_info", CameraInfo, queue_size=1
-        )
-        self.pointcloud_pub = rospy.Publisher(
-            "camera/points", PointCloud2, queue_size=1
         )
 
         # Create base camera with identity transform
@@ -406,28 +381,22 @@ class SimulatedCamera:
         rospy.loginfo("Renderer created successfully")
         return renderer
 
+    def _check_shutdown(self):
+        """Check if shutdown has been requested and raise exception if so"""
+        if rospy.is_shutdown() or shutdown_flag.is_set():
+            raise rospy.ROSInterruptException("Shutdown requested during rendering")
+
     def _render_scene(self, camera_transform: np.ndarray):
         """Render the scene from the given camera transform."""
         rospy.loginfo("Rendering scene...")
 
+        # Check for shutdown before starting rendering
+        self._check_shutdown()
+
         # Update camera transform
         self._update_camera_transform(camera_transform.astype(np.float32))
 
-        # # Render RGB
-        # rospy.loginfo("Rendering RGB image...")
-
-        # # Set a maximum render time for RGB
-        # start_time = time.time()
-        # rgba = self.renderer(self.mesh)
-        # render_time = time.time() - start_time
-        # rospy.loginfo(f"RGB rendering completed in {render_time:.2f} seconds")
-
-        # rgb = rgba[0, ..., :3].detach().cpu().numpy().astype(np.float32)
-        # rospy.loginfo(
-        #     f"RGB image shape: {rgb.shape}, range: [{rgb.min():.2f}, {rgb.max():.2f}]"
-        # )
-
-        # Render depth
+        # Render depth only
         rospy.loginfo("Rendering depth image...")
         start_time = time.time()
         fragments = self.renderer.rasterizer(self.mesh)
@@ -444,31 +413,13 @@ class SimulatedCamera:
         depth = np.where(mask, depth, 0).astype(np.float32)
         rospy.loginfo(f"Valid depth points: {np.sum(mask)}")
 
-        if self.noise_level > 0:
-            rospy.loginfo(f"Adding noise with level {self.noise_level}")
-            noise = np.random.normal(0, self.noise_level, depth.shape).astype(
-                np.float32
-            )
-            depth[mask] += noise[mask]
-            depth = np.where((depth > 0) & (depth < self.max_range), depth, 0).astype(
-                np.float32
-            )
-            rospy.loginfo(
-                f"Depth range after noise: [{depth.min():.2f}, {depth.max():.2f}]"
-            )
-
-        return None, depth
+        return depth
 
     def _render_timeout_handler(self, signum, frame):
         """Handle timeouts in rendering."""
         raise TimeoutError("Rendering operation timed out")
 
-    def create_pointcloud(
-        self,
-        depth: np.ndarray,
-        return_colors: bool = False,
-        rgb: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
+    def create_pointcloud(self, depth: np.ndarray) -> np.ndarray:
         """Create a point cloud from a depth image."""
         rospy.loginfo("Creating point cloud from depth image...")
         H, W = depth.shape
@@ -490,15 +441,6 @@ class SimulatedCamera:
         valid = z > 0
         xyz = np.stack([X[valid], Y[valid], Z[valid]], axis=-1)
         rospy.loginfo(f"Generated {len(xyz)} valid 3D points")
-
-        if return_colors and rgb is not None:
-            colors = rgb[valid]
-            rospy.loginfo(f"Added colors to point cloud")
-            return xyz, colors
-        elif return_colors:
-            # Create default gray colors when rgb is None
-            colors = np.ones((len(xyz), 3), dtype=np.float32) * 0.5
-            return xyz, colors
 
         return xyz
 
@@ -543,12 +485,16 @@ class SimulatedCamera:
             return transform_matrix
 
     def publish_camera_data(self):
-        """Render and publish camera data based on current scene and camera position."""
+        """Render and publish point cloud data based on current scene and camera position."""
         if self.mesh is None:
-            rospy.logwarn("No mesh loaded, cannot publish camera data")
+            rospy.logwarn("No mesh loaded, cannot publish point cloud")
             return
 
-        rospy.loginfo("Publishing camera data...")
+        # Check for shutdown flag at the beginning
+        if rospy.is_shutdown() or shutdown_flag.is_set():
+            return
+
+        rospy.loginfo("Publishing point cloud data...")
 
         try:
             # Get camera transform and render scene
@@ -557,87 +503,42 @@ class SimulatedCamera:
             # Set timeout for rendering (10 seconds maximum)
             signal.alarm(10)
             try:
-                rgb, depth = self._render_scene(camera_transform)
+                depth = self._render_scene(camera_transform)
                 # Cancel the alarm if rendering completes
                 signal.alarm(0)
-            except TimeoutError:
-                rospy.logerr("Rendering timed out, skipping this frame")
-                return
             except Exception as e:
-                signal.alarm(0)  # Cancel the alarm
+                signal.alarm(0)  # Make sure to cancel alarm
                 rospy.logerr(f"Error in rendering: {e}")
                 return
 
-            rospy.loginfo("Scene rendered successfully")
-
-            # Get current timestamp
-            timestamp = rospy.Time.now()
-
-            # Prepare camera info
-            camera_info = self.intrinsics.to_camera_info(self.camera_frame_id)
-            camera_info.header.stamp = timestamp
-
-            # # Publish RGB image
-            # rospy.loginfo("Publishing RGB image...")
-            # rgb_msg = self.bridge.cv2_to_imgmsg(
-            #     cv2.cvtColor((rgb * 255).astype(np.uint8), cv2.COLOR_RGB2BGR),
-            #     encoding="bgr8",
-            # )
-            # rgb_msg.header.frame_id = self.camera_frame_id
-            # rgb_msg.header.stamp = timestamp
-            # self.rgb_pub.publish(rgb_msg)
-            # self.rgb_info_pub.publish(camera_info)
-
-            # Publish depth image
-            rospy.loginfo("Publishing depth image...")
-            depth_msg = self.bridge.cv2_to_imgmsg(
-                depth.astype(np.float32), encoding="32FC1"
-            )
-            depth_msg.header.frame_id = self.camera_frame_id
-            depth_msg.header.stamp = timestamp
-            self.depth_pub.publish(depth_msg)
-            self.depth_info_pub.publish(camera_info)
-
-            # Create and publish point cloud
+            # Create point cloud from depth data
             rospy.loginfo("Creating point cloud...")
-            pointcloud, colors = self.create_pointcloud(
-                depth, return_colors=True, rgb=rgb
-            )
+            pointcloud = self.create_pointcloud(depth)
+
+            if len(pointcloud) == 0:
+                rospy.logwarn("No valid points in point cloud, skipping publication")
+                return
+
             rospy.loginfo(f"Point cloud created with {len(pointcloud)} points")
 
+            # Create point cloud message
             fields = [
                 PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
                 PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
                 PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-                PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
             ]
 
-            if len(pointcloud) > 0:
-                rospy.loginfo("Packing RGB colors for point cloud...")
-                # Pack RGB into a single float32
-                rgb_packed = np.zeros(len(colors), dtype=np.float32)
-                for i in range(len(colors)):
-                    r, g, b = colors[i]
-                    rgb_packed[i] = struct.unpack(
-                        "I",
-                        struct.pack(
-                            "BBBB", int(b * 255), int(g * 255), int(r * 255), 0
-                        ),
-                    )[0]
-
-                cloud_points = np.hstack([pointcloud, rgb_packed.reshape(-1, 1)])
-                rospy.loginfo(f"Point cloud data shape: {cloud_points.shape}")
-            else:
-                rospy.logwarn("No valid points in point cloud, creating dummy point")
-                cloud_points = np.array([[0.0, 0.0, 1000.0, 0.0]], dtype=np.float32)
-
+            # Create point cloud message with consistent frame ID and timestamp
             cloud_msg = pc2.create_cloud(
-                std_msgs.msg.Header(frame_id=self.camera_frame_id, stamp=timestamp),
+                std_msgs.msg.Header(
+                    frame_id=self.camera_frame_id, stamp=rospy.Time.now()
+                ),
                 fields,
-                cloud_points,
+                pointcloud,
             )
-            rospy.loginfo("Publishing point cloud...")
+
             self.pointcloud_pub.publish(cloud_msg)
+            rospy.loginfo("Point cloud published successfully")
 
         except Exception as e:
             rospy.logerr(f"Error in publish_camera_data: {e}")
@@ -693,10 +594,13 @@ def run_camera_node():
                 # Sleep to maintain rate
                 rate.sleep()
             except rospy.ROSInterruptException:
+                rospy.loginfo("Interrupted, shutting down camera node")
                 break
             except Exception as e:
                 rospy.logerr(f"Error in camera node: {e}")
                 time.sleep(0.1)  # Short sleep on error
+    except rospy.ROSInterruptException:
+        rospy.loginfo("Interrupted during initialization, exiting")
     except Exception as e:
         rospy.logerr(f"Error initializing camera: {e}")
     finally:
@@ -704,6 +608,8 @@ def run_camera_node():
             rospy.loginfo("Cleaning up camera resources...")
             camera.cleanup()
         rospy.loginfo("Camera node shutting down")
+        # Clear all alarms to prevent hanging
+        signal.alarm(0)
 
 
 if __name__ == "__main__":
