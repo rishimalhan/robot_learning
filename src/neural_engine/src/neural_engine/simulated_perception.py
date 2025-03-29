@@ -146,7 +146,7 @@ class SimulatedCamera:
     def __init__(
         self,
         device: str = (
-            "mps"
+            "cpu"
             if torch.backends.mps.is_available()
             else "cuda" if torch.cuda.is_available() else "cpu"
         ),
@@ -178,6 +178,11 @@ class SimulatedCamera:
         self.mesh = None
         self.camera_frame_id = get_param("/perception/camera/frame", "tool0")
         self.bridge = CvBridge()
+
+        # Add instance variables for threaded rendering
+        self.rendered_rgba = None
+        self.rendered_depth = None
+        self.render_lock = threading.Lock()
 
         self.shader_type = rospy.get_param(
             "/perception/camera/rendering/shader_type", "soft_phong"
@@ -258,6 +263,9 @@ class SimulatedCamera:
         self.mesh = self._load_mesh_from_scene()
         rospy.loginfo("SimulatedCamera initialization complete")
 
+        # Set signal handler for renderer
+        signal.signal(signal.SIGALRM, self._render_timeout_handler)
+
     def _load_mesh_from_scene(self) -> Meshes:
         """Load a mesh directly from the planning scene."""
         rospy.loginfo("Loading mesh from planning scene...")
@@ -315,30 +323,36 @@ class SimulatedCamera:
         textures = TexturesVertex(verts_features=verts_rgb.unsqueeze(0))
         rospy.loginfo("Created vertex textures")
 
-        # Get pose data
-        if not getattr(obj, "mesh_poses", None):
-            rospy.logerr(f"Object '{object_name}' has no mesh pose data")
-            raise ValueError(f"Object '{object_name}' has no mesh pose data")
+        # Get pose data - use the object's pose directly
+        if hasattr(obj, "pose"):
+            pose = obj.pose
+            translation = torch.tensor(
+                [pose.position.x, pose.position.y, pose.position.z],
+                dtype=torch.float32,
+                device=self.device,
+            )
 
-        pose = obj.mesh_poses[0]
-        translation = torch.tensor(
-            [pose.position.x, pose.position.y, pose.position.z],
-            dtype=torch.float32,
-            device=self.device,
-        )
+            # Convert quaternion to rotation matrix directly
+            quat = [
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            ]
+            rot_matrix = np.array(
+                euler_matrix(*euler_from_quaternion(quat), "sxyz")[:3, :3],
+                dtype=np.float32,
+            )
+        else:
+            rospy.logwarn(
+                f"Object '{object_name}' has no pose data, using identity pose"
+            )
+            translation = torch.zeros(3, dtype=torch.float32, device=self.device)
+            rot_matrix = np.eye(3, dtype=np.float32)
+
+        # Display actual translation values, not just zeros
         rospy.loginfo(
-            f"Mesh translation: [{translation[0]:.3f}, {translation[1]:.3f}, {translation[2]:.3f}]"
-        )
-
-        # Convert quaternion to rotation matrix directly
-        quat = [
-            pose.orientation.x,
-            pose.orientation.y,
-            pose.orientation.z,
-            pose.orientation.w,
-        ]
-        rot_matrix = np.array(
-            euler_matrix(*euler_from_quaternion(quat), "sxyz")[:3, :3], dtype=np.float32
+            f"Mesh translation: [{translation[0].item():.3f}, {translation[1].item():.3f}, {translation[2].item():.3f}]"
         )
         rospy.loginfo("Applied rotation matrix to mesh")
 
@@ -401,7 +415,13 @@ class SimulatedCamera:
 
         # Render RGB
         rospy.loginfo("Rendering RGB image...")
+
+        # Set a maximum render time for RGB
+        start_time = time.time()
         rgba = self.renderer(self.mesh)
+        render_time = time.time() - start_time
+        rospy.loginfo(f"RGB rendering completed in {render_time:.2f} seconds")
+
         rgb = rgba[0, ..., :3].detach().cpu().numpy().astype(np.float32)
         rospy.loginfo(
             f"RGB image shape: {rgb.shape}, range: [{rgb.min():.2f}, {rgb.max():.2f}]"
@@ -409,7 +429,11 @@ class SimulatedCamera:
 
         # Render depth
         rospy.loginfo("Rendering depth image...")
+        start_time = time.time()
         fragments = self.renderer.rasterizer(self.mesh)
+        render_time = time.time() - start_time
+        rospy.loginfo(f"Depth rendering completed in {render_time:.2f} seconds")
+
         depth = fragments.zbuf[0, ..., 0].detach().cpu().numpy().astype(np.float32)
         rospy.loginfo(
             f"Raw depth shape: {depth.shape}, range: [{depth.min():.2f}, {depth.max():.2f}]"
@@ -434,6 +458,10 @@ class SimulatedCamera:
             )
 
         return rgb, depth
+
+    def _render_timeout_handler(self, signum, frame):
+        """Handle timeouts in rendering."""
+        raise TimeoutError("Rendering operation timed out")
 
     def create_pointcloud(
         self,
@@ -518,75 +546,97 @@ class SimulatedCamera:
 
         rospy.loginfo("Publishing camera data...")
 
-        # Get camera transform and render scene
-        camera_transform = self.get_camera_transform()
-        rgb, depth = self._render_scene(camera_transform)
-        rospy.loginfo("Scene rendered successfully")
+        try:
+            # Get camera transform and render scene
+            camera_transform = self.get_camera_transform()
 
-        # Get current timestamp
-        timestamp = rospy.Time.now()
+            # Set timeout for rendering (10 seconds maximum)
+            signal.alarm(10)
+            try:
+                rgb, depth = self._render_scene(camera_transform)
+                # Cancel the alarm if rendering completes
+                signal.alarm(0)
+            except TimeoutError:
+                rospy.logerr("Rendering timed out, skipping this frame")
+                return
+            except Exception as e:
+                signal.alarm(0)  # Cancel the alarm
+                rospy.logerr(f"Error in rendering: {e}")
+                return
 
-        # Prepare camera info
-        camera_info = self.intrinsics.to_camera_info(self.camera_frame_id)
-        camera_info.header.stamp = timestamp
+            rospy.loginfo("Scene rendered successfully")
 
-        # Publish RGB image
-        rospy.loginfo("Publishing RGB image...")
-        rgb_msg = self.bridge.cv2_to_imgmsg(
-            cv2.cvtColor((rgb * 255).astype(np.uint8), cv2.COLOR_RGB2BGR),
-            encoding="bgr8",
-        )
-        rgb_msg.header.frame_id = self.camera_frame_id
-        rgb_msg.header.stamp = timestamp
-        self.rgb_pub.publish(rgb_msg)
-        self.rgb_info_pub.publish(camera_info)
+            # Get current timestamp
+            timestamp = rospy.Time.now()
 
-        # Publish depth image
-        rospy.loginfo("Publishing depth image...")
-        depth_msg = self.bridge.cv2_to_imgmsg(
-            depth.astype(np.float32), encoding="32FC1"
-        )
-        depth_msg.header.frame_id = self.camera_frame_id
-        depth_msg.header.stamp = timestamp
-        self.depth_pub.publish(depth_msg)
-        self.depth_info_pub.publish(camera_info)
+            # Prepare camera info
+            camera_info = self.intrinsics.to_camera_info(self.camera_frame_id)
+            camera_info.header.stamp = timestamp
 
-        # Create and publish point cloud
-        rospy.loginfo("Creating point cloud...")
-        pointcloud, colors = self.create_pointcloud(depth, return_colors=True, rgb=rgb)
-        rospy.loginfo(f"Point cloud created with {len(pointcloud)} points")
+            # Publish RGB image
+            rospy.loginfo("Publishing RGB image...")
+            rgb_msg = self.bridge.cv2_to_imgmsg(
+                cv2.cvtColor((rgb * 255).astype(np.uint8), cv2.COLOR_RGB2BGR),
+                encoding="bgr8",
+            )
+            rgb_msg.header.frame_id = self.camera_frame_id
+            rgb_msg.header.stamp = timestamp
+            self.rgb_pub.publish(rgb_msg)
+            self.rgb_info_pub.publish(camera_info)
 
-        fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
-        ]
+            # Publish depth image
+            rospy.loginfo("Publishing depth image...")
+            depth_msg = self.bridge.cv2_to_imgmsg(
+                depth.astype(np.float32), encoding="32FC1"
+            )
+            depth_msg.header.frame_id = self.camera_frame_id
+            depth_msg.header.stamp = timestamp
+            self.depth_pub.publish(depth_msg)
+            self.depth_info_pub.publish(camera_info)
 
-        if len(pointcloud) > 0:
-            rospy.loginfo("Packing RGB colors for point cloud...")
-            # Pack RGB into a single float32
-            rgb_packed = np.zeros(len(colors), dtype=np.float32)
-            for i in range(len(colors)):
-                r, g, b = colors[i]
-                rgb_packed[i] = struct.unpack(
-                    "I",
-                    struct.pack("BBBB", int(b * 255), int(g * 255), int(r * 255), 0),
-                )[0]
+            # Create and publish point cloud
+            rospy.loginfo("Creating point cloud...")
+            pointcloud, colors = self.create_pointcloud(
+                depth, return_colors=True, rgb=rgb
+            )
+            rospy.loginfo(f"Point cloud created with {len(pointcloud)} points")
 
-            cloud_points = np.hstack([pointcloud, rgb_packed.reshape(-1, 1)])
-            rospy.loginfo(f"Point cloud data shape: {cloud_points.shape}")
-        else:
-            rospy.logwarn("No valid points in point cloud, creating dummy point")
-            cloud_points = np.array([[0.0, 0.0, 1000.0, 0.0]], dtype=np.float32)
+            fields = [
+                PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+                PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+                PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+                PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+            ]
 
-        cloud_msg = pc2.create_cloud(
-            std_msgs.msg.Header(frame_id=self.camera_frame_id, stamp=timestamp),
-            fields,
-            cloud_points,
-        )
-        rospy.loginfo("Publishing point cloud...")
-        self.pointcloud_pub.publish(cloud_msg)
+            if len(pointcloud) > 0:
+                rospy.loginfo("Packing RGB colors for point cloud...")
+                # Pack RGB into a single float32
+                rgb_packed = np.zeros(len(colors), dtype=np.float32)
+                for i in range(len(colors)):
+                    r, g, b = colors[i]
+                    rgb_packed[i] = struct.unpack(
+                        "I",
+                        struct.pack(
+                            "BBBB", int(b * 255), int(g * 255), int(r * 255), 0
+                        ),
+                    )[0]
+
+                cloud_points = np.hstack([pointcloud, rgb_packed.reshape(-1, 1)])
+                rospy.loginfo(f"Point cloud data shape: {cloud_points.shape}")
+            else:
+                rospy.logwarn("No valid points in point cloud, creating dummy point")
+                cloud_points = np.array([[0.0, 0.0, 1000.0, 0.0]], dtype=np.float32)
+
+            cloud_msg = pc2.create_cloud(
+                std_msgs.msg.Header(frame_id=self.camera_frame_id, stamp=timestamp),
+                fields,
+                cloud_points,
+            )
+            rospy.loginfo("Publishing point cloud...")
+            self.pointcloud_pub.publish(cloud_msg)
+
+        except Exception as e:
+            rospy.logerr(f"Error in publish_camera_data: {e}")
 
     def cleanup(self):
         """Clean up resources."""
@@ -616,7 +666,7 @@ def run_camera_node():
     rospy.init_node("simulated_rgbd_camera")
 
     # Get rate parameter
-    rate_hz = get_param("/perception/camera/sensing/frame_rate", 10)
+    rate_hz = get_param("/perception/camera/sensing/frame_rate", 30)  # Default to 30Hz
     rospy.loginfo(f"Publishing at {rate_hz} Hz")
 
     camera = None
@@ -629,7 +679,7 @@ def run_camera_node():
 
         while not rospy.is_shutdown() and not shutdown_flag.is_set():
             try:
-                # Publish camera data
+                # Publish camera data with timeout protection
                 camera.publish_camera_data()
 
                 # Log occasionally to show activity
