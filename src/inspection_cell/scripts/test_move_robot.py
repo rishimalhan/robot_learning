@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import math
 import rospy
 import numpy as np
 import random
@@ -42,7 +43,7 @@ class PointCloudProcessor:
 
     def pointcloud_callback(self, cloud_msg):
         """Process incoming pointcloud data"""
-        rospy.loginfo(
+        rospy.logdebug(
             "Received pointcloud with %d points", cloud_msg.width * cloud_msg.height
         )
 
@@ -98,7 +99,7 @@ class PointCloudProcessor:
             filtered_points = points[inlier_indices]
             removed = len(points) - len(filtered_points)
             if removed > 0:
-                rospy.loginfo(f"Removed {removed} outlier points")
+                rospy.logdebug(f"Removed {removed} outlier points")
 
             return filtered_points
         except Exception as e:
@@ -107,7 +108,7 @@ class PointCloudProcessor:
 
     def _remove_duplicate_points(self, points, distance_threshold=0.005):
         """Remove duplicate points that are very close to each other using voxel grid"""
-        rospy.loginfo(f"Deduplicating points: {len(points)} input points")
+        rospy.logdebug(f"Deduplicating points: {len(points)} input points")
 
         try:
             # Create grid with cells of size distance_threshold
@@ -149,7 +150,7 @@ class PointCloudProcessor:
             # Get the unique points
             unique_points = points[unique_indices]
 
-            rospy.loginfo(f"After deduplication: {len(unique_points)} points")
+            rospy.logdebug(f"After deduplication: {len(unique_points)} points")
             return unique_points
         except Exception as e:
             rospy.logwarn(f"Error in deduplication: {e}, keeping original points")
@@ -182,14 +183,14 @@ class PointCloudProcessor:
 
         # Publish the augmented pointcloud
         self.reconstruction_pub.publish(self.augmented_pointcloud)
-        rospy.loginfo(
+        rospy.logdebug(
             "Published persistent augmented pointcloud with %d points",
             len(self.persistent_points),
         )
 
 
 def get_robot_roi_bounds(env):
-    """Get the X,Y bounds of the robot_roi from the planning scene"""
+    """Get the X,Y bounds of the robot_roi from the planning scene, including any translation"""
     rospy.loginfo("Retrieving robot_roi information from planning scene...")
 
     # Wait a bit for the scene to be fully loaded
@@ -213,14 +214,16 @@ def get_robot_roi_bounds(env):
     # Get dimensions from primitive
     dimensions = list(roi_object.primitives[0].dimensions)
 
-    # Get position from primitive pose
-    position = roi_object.primitive_poses[0].position
-    position_list = [position.x, position.y, position.z]
+    # Get position and orientation from pose
+    position = roi_object.pose.position
+    # Get orientation quaternion
+    orientation = roi_object.pose.orientation
 
     # Calculate bounds (half-width from center position)
-    half_x, half_y, half_z = [d / 2 for d in dimensions]
-    x, y, z = position_list
+    half_x, half_y, half_z = dimensions[0] / 2, dimensions[1] / 2, dimensions[2] / 2
+    x, y, z = position.x, position.y, position.z
 
+    # Calculate bounds in world coordinates
     x_min, x_max = x - half_x, x + half_x
     y_min, y_max = y - half_y, y + half_y
 
@@ -230,11 +233,10 @@ def get_robot_roi_bounds(env):
         "x_max": x_max,
         "y_min": y_min,
         "y_max": y_max,
-        "z": z,  # Center Z height
     }
 
     rospy.loginfo(
-        f"ROI bounds: X: [{x_min:.3f}, {x_max:.3f}], Y: [{y_min:.3f}, {y_max:.3f}], Z: {z:.3f}"
+        f"ROI bounds (in world frame): X: [{x_min:.3f}, {x_max:.3f}], Y: [{y_min:.3f}, {y_max:.3f}], Z: {z:.3f}"
     )
     return roi_bounds
 
@@ -245,94 +247,145 @@ def main():
     env = EnvironmentLoader()
     executor = Executor()
 
-    # Initialize the pointcloud processor
-    pointcloud_processor = PointCloudProcessor()
-
     # Get the robot_roi bounds
     roi_bounds = get_robot_roi_bounds(env)
     if not roi_bounds:
         rospy.logerr("Required robot_roi object not found in the scene. Exiting.")
         return
 
-    # Give time for subscriptions to establish
-    rospy.sleep(1.0)
-
-    # Move to home position first
-    rospy.loginfo("Moving to home position...")
-    success, plan, planning_time, error_code = env.planner.plan_to_named_target("home")
-    if success and plan:
-        executor.execute_plan(plan)
-        pointcloud_processor.create_augmented_pointcloud()
-    else:
-        rospy.logerr("Failed to plan to home position")
-        return
-
-    success, plan, planning_time, error_code = env.planner.plan_to_ee_offset(
-        direction=[0, 0, 1], distance=0.2
-    )
-    if success and plan:
-        executor.execute_plan(plan)
-        pointcloud_processor.create_augmented_pointcloud()
-
-    # Number of random movements to perform
-    num_movements = 10
-    count = 0
-    while count < num_movements:
-        # Get current end effector pose
-        current_pose = env.planner.move_group.get_current_pose().pose
-        current_x = current_pose.position.x
-        current_y = current_pose.position.y
-
-        # Generate random target within ROI bounds
-        target_x = random.uniform(roi_bounds["x_min"], roi_bounds["x_max"])
-        target_y = random.uniform(roi_bounds["y_min"], roi_bounds["y_max"])
-
-        # Calculate offset from current position
-        offset_x = target_x - current_x
-        offset_y = target_y - current_y
-
-        # Calculate direction vector (normalized)
-        distance = np.sqrt(offset_x**2 + offset_y**2)
-
-        # Ensure minimum movement distance
-        if distance < 0.05:  # If movement too small, skip
-            continue
-
-        # Calculate direction and distance
-        direction_x = offset_x / distance
-        direction_y = offset_y / distance
-
-        # Plan and execute movement in X direction
-        rospy.loginfo(f"Moving to X: {target_x:.3f}, Y: {target_y:.3f}")
-        success, plan, planning_time, error_code = env.planner.plan_to_ee_offset(
-            direction=[direction_x, direction_y, 0],
-            distance=distance,
+    try:
+        # Step 1: Move to home position first
+        rospy.loginfo("Step 1: Moving to home position...")
+        success, plan, planning_time, error_code = env.planner.plan_to_named_target(
+            "home"
         )
-
         if success and plan:
             executor.execute_plan(plan)
-            pointcloud_processor.create_augmented_pointcloud()
         else:
-            rospy.logwarn(
-                f"Failed to plan movement to [{target_x:.3f}, {target_y:.3f}]"
+            rospy.logerr("Failed to plan to home position")
+            return
+
+        # Step 2: Move down along tool Z by 0.25 meters
+        rospy.loginfo("Step 2: Moving down along tool Z by 0.25 meters...")
+        success, plan, planning_time, error_code = env.planner.plan_to_ee_offset(
+            direction=[0, 0, 1],
+            distance=0.25,
+        )
+        if success and plan:
+            executor.execute_plan(plan)
+        else:
+            rospy.logerr("Failed to move down along Z. Exiting.")
+            return
+
+        # Initialize the pointcloud processor
+        pointcloud_processor = PointCloudProcessor()
+
+        # Step 3: Make random movements in X-Y plane within roi_bounds
+        rospy.loginfo(
+            "Step 3: Making random movements in X-Y plane within ROI bounds..."
+        )
+
+        # Number of random movements to perform
+        num_movements = 100
+        successful_movements = 0
+        max_attempts = 1000  # Prevent infinite loop if many movements fail
+
+        attempt = 0
+        while successful_movements < num_movements and attempt < max_attempts:
+            if rospy.is_shutdown():
+                rospy.loginfo("ROS shutdown detected. Exiting.")
+                break
+
+            attempt += 1
+            rospy.loginfo(
+                f"Attempting movement {attempt} (completed {successful_movements}/{num_movements})"
             )
-            continue
 
-        # Small delay between movements
-        rospy.sleep(0.5)
-        rospy.loginfo(f"Random movement {count+1}/{num_movements}... done")
-        count += 1
-    # Return to home position
-    rospy.loginfo("Returning to home position...")
-    success, plan, planning_time, error_code = env.planner.plan_to_named_target("home")
-    if success and plan:
-        executor.execute_plan(plan)
-        pointcloud_processor.create_augmented_pointcloud()
+            # Get current end effector pose
+            current_pose = env.planner.move_group.get_current_pose(
+                end_effector_link="tool0"
+            ).pose
+            current_x = current_pose.position.x
+            current_y = current_pose.position.y
 
-    rospy.loginfo(
-        "Random movement exploration complete, continuing to process pointclouds..."
-    )
-    rospy.spin()
+            # 1. Sample a random direction in X-Y plane
+            angle = random.uniform(0, 2 * math.pi)  # Random angle in radians
+            direction_x = math.cos(angle)
+            direction_y = math.sin(angle)
+
+            # 2. Sample a random distance between 0-0.3m
+            distance_x = random.uniform(0.05, 0.3)  # Random distance between 0.05-0.3m
+            distance_y = random.uniform(0.05, 0.8)  # Random distance between 0.05-0.3m
+
+            # 3. Calculate target position
+            target_x = current_x + (direction_x * distance_x)
+            target_y = current_y + (direction_y * distance_y)
+
+            # 4. Check if target is within ROI bounds
+            if (
+                target_x < roi_bounds["x_min"]
+                or target_x > roi_bounds["x_max"]
+                or target_y < roi_bounds["y_min"]
+                or target_y > roi_bounds["y_max"]
+            ):
+                rospy.loginfo("Target outside ROI bounds, trying again...")
+                continue
+
+            # Plan and execute movement in X-Y plane only
+            rospy.loginfo(
+                f"Planning in direction [{direction_x:.3f}, {direction_y:.3f}] for {distance_x:.3f}m, {distance_y:.3f}m"
+            )
+            success, plan, planning_time, error_code = env.planner.plan_to_ee_offset(
+                direction=[direction_x, direction_y, 0],
+                distance=np.linalg.norm(
+                    [direction_x * distance_x, direction_y * distance_y]
+                ),
+            )
+
+            if success and plan:
+                executor.execute_plan(plan)
+                # Only create pointcloud after movement completes
+                pointcloud_processor.create_augmented_pointcloud()
+                successful_movements += 1
+                rospy.loginfo(
+                    f"Successfully completed movement {successful_movements}/{num_movements}"
+                )
+            else:
+                rospy.logwarn(
+                    f"Failed to plan movement in direction [{direction_x:.3f}, {direction_y:.3f}]"
+                )
+
+            # Check for ctrl+c between movements
+            if rospy.is_shutdown():
+                rospy.loginfo("Ctrl+C detected. Stopping movements.")
+                break
+
+            # Small delay between movements
+            rospy.sleep(0.5)
+
+        if successful_movements < num_movements and not rospy.is_shutdown():
+            rospy.logwarn(
+                f"Could only complete {successful_movements}/{num_movements} movements after {attempt} attempts"
+            )
+
+        # Return to home position
+        if not rospy.is_shutdown():
+            rospy.loginfo("Returning to home position...")
+            success, plan, planning_time, error_code = env.planner.plan_to_named_target(
+                "home"
+            )
+            if success and plan:
+                executor.execute_plan(plan)
+                pointcloud_processor.create_augmented_pointcloud()
+
+    except rospy.ROSInterruptException:
+        rospy.loginfo("Program interrupted by user")
+    except Exception as e:
+        rospy.logerr(f"Error during execution: {str(e)}")
+    finally:
+        rospy.loginfo("Clean shutdown. Exiting.")
+
+    # No rospy.spin() to make it easier to interrupt
 
 
 if __name__ == "__main__":
