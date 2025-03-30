@@ -410,10 +410,6 @@ class SimulatedPerception:
 
             # For each visible face, process its vertices
             if len(visible_face_indices) == 0:
-                rospy.logwarn_throttle(
-                    5.0,
-                    "No faces visible from current camera view based on normal angle",
-                )
                 return np.array([], dtype=np.float32).reshape(0, 3)
 
             # Get vertices of visible faces

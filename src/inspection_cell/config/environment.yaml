@@ -43,9 +43,9 @@ objects:
 
   robot_roi:
     type: box
-    dimensions: [0.8, 2.0, 0.4]
+    dimensions: [0.8, 2.0, 0.35]
     pose:
-      position: [1.0, 0.0, 1.0]
+      position: [1.0, 0.0, 1.1]
       orientation: [0.0, 0.0, 0.0]
     color: [0.0, 1.0, 0.0]
     alpha: 0.1
@@ -99,14 +99,25 @@ objects:
     # collision_enabled: true
     # visible: true
 
+    # type: mesh
+    # mesh_path: "package://inspection_cell/assets/propeller.stl"
+    # pose:
+    #   position: [0.8, 0.8, 0.65]
+    #   orientation: [1.57, 0.0, 0.0]
+    # color: [0.922, 0.918, 0.88]
+    # alpha: 1.0
+    # scale: [0.7, 0.7, 0.7]
+    # collision_enabled: true
+    # visible: true
+
     type: mesh
-    mesh_path: "package://inspection_cell/assets/propeller.stl"
+    mesh_path: "package://inspection_cell/assets/ascent_mold.stl"
     pose:
-      position: [0.8, 0.8, 0.65]
-      orientation: [1.57, 0.0, 0.0]
+      position: [0.6, -0.5, 0.7]
+      orientation: [0.0, 0.0, 0.0]
     color: [0.922, 0.918, 0.88]
     alpha: 1.0
-    scale: [0.7, 0.7, 0.7]
+    scale: [1.5, 1.5, 1.5]
     collision_enabled: true
     visible: true
 

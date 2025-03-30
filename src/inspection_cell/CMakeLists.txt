@@ -171,6 +171,7 @@ catkin_install_python(PROGRAMS
   src/inspection_cell/planner.py
   src/inspection_cell/executor.py
   src/inspection_cell/simulated_perception.py
+  src/inspection_cell/point_cloud_processor.py
   scripts/test_move_robot.py
   scripts/test_collision_checker.py
   scripts/sample_roi_poses.py
