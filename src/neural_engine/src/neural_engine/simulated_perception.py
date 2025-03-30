@@ -94,24 +94,24 @@ class SimulatedPerception:
         camera_frame = get_param("/perception/camera/frame", "tool0")
 
         # Load constraint parameters
-        constraints = get_param("/perception/camera/constraints", {})
-        max_normal_angle = constraints.get("max_normal_angle", 30.0)
+        constraints = get_param("/perception/camera/constraints")
+        max_normal_angle = constraints.get("max_normal_angle")
 
-        vertical_distance = constraints.get("vertical_distance", {})
-        min_vertical_distance = vertical_distance.get("min", 0.05)
-        max_vertical_distance = vertical_distance.get("max", 0.5)
+        vertical_distance = constraints.get("vertical_distance")
+        min_vertical_distance = vertical_distance.get("min")
+        max_vertical_distance = vertical_distance.get("max")
 
-        horizontal_distance = constraints.get("horizontal_distance", {})
-        max_horizontal_distance = horizontal_distance.get("max", 0.3)
+        horizontal_distance = constraints.get("horizontal_distance")
+        max_horizontal_distance = horizontal_distance.get("max")
 
         # Load sensing parameters
-        sensing = get_param("/perception/camera/sensing", {})
-        noise_config = sensing.get("noise", {})
+        sensing = get_param("/perception/camera/sensing")
+        noise_config = sensing.get("noise")
 
         # Get noise parameters with defaults
-        noise_horizontal = noise_config.get("horizontal", 0.0)
-        noise_vertical = noise_config.get("vertical", 0.0)
-        noise_distance_factor = noise_config.get("distance_factor", 0.0)
+        noise_horizontal = noise_config.get("horizontal")
+        noise_vertical = noise_config.get("vertical")
+        noise_distance_factor = noise_config.get("distance_factor")
 
         # Clamp noise levels to valid range
         noise_horizontal = max(0.0, min(1.0, noise_horizontal))
@@ -338,8 +338,7 @@ class SimulatedPerception:
 
         # Check if we've pre-computed mesh data
         if self.face_normals is None:
-            rospy.logwarn_throttle(5.0, "Mesh data not pre-computed, doing it now")
-            self._precompute_mesh_data()
+            raise ValueError("Mesh data not pre-computed, cannot generate point cloud")
 
         # Record start time for performance monitoring
         start_time = time.time()
@@ -375,25 +374,41 @@ class SimulatedPerception:
         )
 
         with torch.no_grad():
-            # Now that normals are correctly oriented, calculate angle with camera
-            normal_dot_view = torch.abs(
-                torch.matmul(self.face_normals, camera_forward_tensor)
-            )
-            # Convert to angle in degrees
+            # For visibility, we want surfaces where normal is pointing toward camera
+            # Camera looking at surface: camera_forward is toward surface, normal is away from surface
+            # These vectors point in opposite directions, so their dot product should be negative
+            normal_dot_view = torch.matmul(self.face_normals, camera_forward_tensor)
+
+            # Visible surfaces have dot product < 0 (normal and camera direction > 90° apart)
+            is_visible = normal_dot_view < 0
+
+            # Calculate angle between normal and camera direction
+            # Taking negative dot product so that angle=0 means directly facing camera
             normal_angles = (
-                torch.acos(torch.clamp(normal_dot_view, -1.0, 1.0)) * 180.0 / np.pi
+                torch.acos(torch.clamp(-normal_dot_view, -1.0, 1.0)) * 180.0 / np.pi
             )
 
-            # Filter by maximum normal angle
-            max_angle_rad = self.camera_params.max_normal_angle
-            visible_faces = normal_angles <= max_angle_rad
+            # Filter by maximum normal angle - faces should point toward camera
+            angle_mask = normal_angles <= self.camera_params.max_normal_angle
+
+            # Final visibility mask - must be facing camera and within angle threshold
+            visible_faces = is_visible & angle_mask
+
+            # Get indices of visible faces
+            visible_face_indices = torch.nonzero(visible_faces, as_tuple=True)[0]
+
+            # Log visibility stats
+            num_visible = visible_face_indices.shape[0]
+            num_total = self.face_normals.shape[0]
+            rospy.logdebug_throttle(
+                1.0,
+                f"Visible faces: {num_visible} of {num_total} ({100.0*num_visible/max(1,num_total):.1f}%)",
+            )
 
             # Get inverse of camera transform (camera_T_world)
             camera_transform_inv = torch.inverse(camera_transform_tensor)
 
             # For each visible face, process its vertices
-            visible_face_indices = torch.nonzero(visible_faces, as_tuple=True)[0]
-
             if len(visible_face_indices) == 0:
                 rospy.logwarn_throttle(
                     5.0,
@@ -407,15 +422,13 @@ class SimulatedPerception:
             # Flatten to get all vertices from visible faces (may include duplicates)
             vertices = visible_face_vertices.reshape(-1, 3)
 
-            # Transform vertices to camera space - more efficient batch operation
+            # Transform vertices to camera space
             ones = torch.ones(
                 (vertices.shape[0], 1),
                 dtype=torch.float32,
                 device=self.device,
             )
             vertices_homogeneous = torch.cat([vertices, ones], dim=1)
-
-            # More efficient matrix multiplication
             vertices_camera = torch.matmul(vertices_homogeneous, camera_transform_inv.T)
 
             # Get camera space coordinates
@@ -425,13 +438,13 @@ class SimulatedPerception:
                 vertices_camera[:, 2],
             )
 
-            # Calculate vertical distance (along Z axis)
-            vertical_distance = z
+            # Calculate distances
+            vertical_distance = z  # Distance along camera Z axis
+            horizontal_distance = torch.sqrt(
+                x * x + y * y
+            )  # Radial distance from Z axis
 
-            # Calculate horizontal distance (perpendicular to Z axis)
-            horizontal_distance = torch.sqrt(x * x + y * y)
-
-            # Apply constraints
+            # Apply distance constraints
             in_vertical_range = (
                 vertical_distance >= self.camera_params.min_vertical_distance
             ) & (vertical_distance <= self.camera_params.max_vertical_distance)
@@ -444,79 +457,55 @@ class SimulatedPerception:
             valid_vertices = in_vertical_range & in_horizontal_range
 
             if torch.sum(valid_vertices) == 0:
-                rospy.logwarn_throttle(
-                    5.0,
-                    "No points visible from current camera view based on distance constraints",
-                )
                 return np.array([], dtype=np.float32).reshape(0, 3)
 
-            # Get filtered world space points
+            # Get filtered points in world and camera space
             valid_world_points = vertices[valid_vertices]
-
-            # Also get camera space coordinates of valid points
             valid_camera_points = vertices_camera[valid_vertices]
 
-            # Log filtered results with throttling
+            # Log filtered results
             rospy.logdebug_throttle(
                 1.0,
                 f"Filtered points: {len(valid_world_points)} of {len(vertices)} | "
                 f"Faces: {len(visible_face_indices)} of {len(self.mesh_faces)}",
             )
 
-            # Add Gaussian noise to the point cloud if noise parameters > 0
+            # Add Gaussian noise if enabled
             if (
                 self.camera_params.noise_horizontal > 0
                 or self.camera_params.noise_vertical > 0
                 or self.camera_params.noise_distance_factor > 0
             ):
-
-                # Get point distances for distance-dependent noise scaling
+                # Scale noise based on distance from camera
                 distances = torch.norm(valid_camera_points[:, :3], dim=1)
                 distance_scale = (
                     1.0 + distances * self.camera_params.noise_distance_factor
                 )
 
-                # Create noise tensors
                 noise = torch.zeros_like(valid_world_points)
 
-                # Generate horizontal noise (in X and Y) - vectorized
+                # Apply horizontal noise (in camera X-Y plane)
                 if self.camera_params.noise_horizontal > 0:
-                    # Generate random noise along camera X and Y directions
-                    x_noise = (
-                        torch.randn(valid_world_points.size(0), device=self.device)
+                    xy_noise = (
+                        torch.randn((valid_world_points.size(0), 2), device=self.device)
                         * self.camera_params.noise_horizontal
-                    )
-                    y_noise = (
-                        torch.randn(valid_world_points.size(0), device=self.device)
-                        * self.camera_params.noise_horizontal
+                        * distance_scale.unsqueeze(1)
                     )
 
-                    # Scale by distance factor
-                    x_noise = x_noise * distance_scale
-                    y_noise = y_noise * distance_scale
+                    noise += torch.einsum("ij,k->ij", xy_noise[:, [0]], camera_x_tensor)
+                    noise += torch.einsum("ij,k->ij", xy_noise[:, [1]], camera_y_tensor)
 
-                    # Vectorized noise application
-                    noise += torch.einsum("i,j->ij", x_noise, camera_x_tensor)
-                    noise += torch.einsum("i,j->ij", y_noise, camera_y_tensor)
-
-                # Generate vertical noise (along camera Z) - vectorized
+                # Apply vertical noise (along camera Z)
                 if self.camera_params.noise_vertical > 0:
-                    # Generate random noise along camera Z direction
                     z_noise = (
                         torch.randn(valid_world_points.size(0), device=self.device)
                         * self.camera_params.noise_vertical
+                        * distance_scale
                     )
-
-                    # Scale by distance factor
-                    z_noise = z_noise * distance_scale
-
-                    # Vectorized noise application
                     noise += torch.einsum("i,j->ij", z_noise, camera_z_tensor)
 
-                # Apply combined noise
                 valid_world_points = valid_world_points + noise
 
-                # Log noise info with throttling
                 rospy.logdebug_throttle(
                     1.0,
                     f"Added noise: h={self.camera_params.noise_horizontal:.4f}, "
@@ -524,10 +513,10 @@ class SimulatedPerception:
                     f"scale={self.camera_params.noise_distance_factor:.2f}",
                 )
 
-            # Convert to numpy only at the end
+            # Convert to numpy array
             pointcloud = valid_world_points.cpu().numpy()
 
-            # Log performance metrics with throttling
+            # Log performance
             elapsed = time.time() - start_time
             rospy.logdebug_throttle(
                 1.0, f"Point cloud generation took {elapsed:.3f} seconds"
@@ -542,7 +531,6 @@ class SimulatedPerception:
             pointcloud = self.generate_pointcloud()
 
             if pointcloud is None or len(pointcloud) == 0:
-                rospy.logwarn_throttle(5.0, "No points to publish")
                 return
 
             # Create point cloud message

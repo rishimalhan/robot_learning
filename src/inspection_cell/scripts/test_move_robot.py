@@ -12,9 +12,12 @@ import sensor_msgs.point_cloud2 as pc2
 import std_msgs.msg
 from collections import deque
 from moveit_msgs.msg import CollisionObject
-from shape_msgs.msg import SolidPrimitive
-import traceback
+from shape_msgs.msg import SolidPrimitive, Mesh
+from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Pose, Point, Quaternion
+import traceback
+import open3d as o3d
+import uuid
 
 
 class PointCloudProcessor:
@@ -40,6 +43,24 @@ class PointCloudProcessor:
         self.reconstruction_pub = rospy.Publisher(
             "reconstruction", PointCloud2, queue_size=1
         )
+
+        # Set up publisher for the reconstructed mesh
+        self.mesh_pub = rospy.Publisher("reconstructed_mesh", MarkerArray, queue_size=1)
+
+        # Mesh reconstruction parameters
+        self.alpha = 0.05  # Alpha value for Alpha shape reconstruction
+        self.downsample_voxel_size = (
+            0.01  # Downsample to 1cm voxels before mesh creation
+        )
+        self.min_mesh_points = 100  # Minimum points needed for mesh reconstruction
+        self.mesh_color = [0.0, 0.8, 0.3, 0.6]  # RGBA (semi-transparent green)
+        self.mesh_publish_interval = (
+            10  # Only publish mesh every X point clouds to avoid flooding
+        )
+        self.point_count = 0  # Counter for mesh publishing interval
+
+        # Suppress Open3D console output to avoid flooding
+        o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
         rospy.loginfo("PointCloud processor initialized")
 
@@ -159,7 +180,7 @@ class PointCloudProcessor:
             return points
 
     def create_augmented_pointcloud(self):
-        """Create an augmented pointcloud from all persistent points"""
+        """Create an augmented pointcloud from all persistent points and generate mesh"""
         if self.persistent_points is None or len(self.persistent_points) == 0:
             rospy.logwarn(
                 "No persistent points available to create augmented pointcloud"
@@ -185,10 +206,120 @@ class PointCloudProcessor:
 
         # Publish the augmented pointcloud
         self.reconstruction_pub.publish(self.augmented_pointcloud)
+
+        # Create and publish mesh from the point cloud
+        self.create_and_publish_mesh()
+
         rospy.logdebug(
             "Published persistent augmented pointcloud with %d points",
             len(self.persistent_points),
         )
+
+    def create_and_publish_mesh(self):
+        """Create a mesh from the point cloud and publish it as markers"""
+        if (
+            self.persistent_points is None
+            or len(self.persistent_points) < self.min_mesh_points
+        ):
+            return
+
+        # Only regenerate mesh periodically to avoid overwhelming RViz and console
+        self.point_count += 1
+        if self.point_count % self.mesh_publish_interval != 0:
+            return
+
+        try:
+            # Convert numpy array to Open3D point cloud
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(self.persistent_points[:, :3])
+
+            # Statistical outlier removal to clean up the point cloud
+            pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+
+            # Downsample for efficiency and better mesh quality
+            pcd = pcd.voxel_down_sample(voxel_size=self.downsample_voxel_size)
+
+            # Ensure we still have enough points after filtering
+            if len(pcd.points) < self.min_mesh_points:
+                rospy.logwarn(f"Too few points after preprocessing: {len(pcd.points)}")
+                return
+
+            # Estimate normals
+            pcd.estimate_normals(
+                search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
+            )
+
+            # Use Alpha shape reconstruction for the visible surfaces
+            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
+                pcd, self.alpha
+            )
+
+            # Clean up the mesh
+            mesh.remove_degenerate_triangles()
+            mesh.remove_duplicated_triangles()
+            mesh.remove_duplicated_vertices()
+            mesh.remove_non_manifold_edges()
+
+            # Create marker array
+            marker_array = MarkerArray()
+
+            # Create mesh marker
+            marker = Marker()
+            marker.header.frame_id = "world"
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "reconstructed_mesh"
+            marker.id = 0
+            marker.type = Marker.TRIANGLE_LIST
+            marker.action = Marker.ADD
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 1.0
+            marker.scale.y = 1.0
+            marker.scale.z = 1.0
+            marker.color.r = self.mesh_color[0]
+            marker.color.g = self.mesh_color[1]
+            marker.color.b = self.mesh_color[2]
+            marker.color.a = self.mesh_color[3]
+
+            # Add triangles to marker
+            vertices = np.asarray(mesh.vertices)
+            triangles = np.asarray(mesh.triangles)
+
+            # Skip if no triangles were created
+            if len(triangles) == 0:
+                rospy.logwarn("No triangles generated in the mesh")
+                return
+
+            # Add all triangles to the marker
+            for triangle in triangles:
+                for vertex_idx in triangle:
+                    point = Point()
+                    point.x = vertices[vertex_idx, 0]
+                    point.y = vertices[vertex_idx, 1]
+                    point.z = vertices[vertex_idx, 2]
+                    marker.points.append(point)
+
+            # Add marker to array
+            marker_array.markers.append(marker)
+
+            # Publish marker array
+            self.mesh_pub.publish(marker_array)
+            rospy.loginfo(
+                f"Published reconstructed mesh with {len(triangles)} triangles"
+            )
+
+        except RuntimeError as e:
+            # Handle Open3D specific errors
+            error_msg = str(e)
+            if "operator()" in error_msg or "Failed to close loop" in error_msg:
+                rospy.logwarn(
+                    "Open3D mesh construction error - using different alpha value next time"
+                )
+                # Adjust alpha value slightly to avoid the same error next time
+                self.alpha = max(0.01, self.alpha * 0.9)
+            else:
+                rospy.logwarn(f"Error creating mesh: {e}")
+        except Exception as e:
+            rospy.logwarn(f"Error creating mesh: {e}")
 
 
 def get_robot_roi_bounds(env):

@@ -1,39 +1,38 @@
 # Configuration for direct mesh-to-pointcloud generation
+perception:
+  # Mesh configuration
+  mesh:
+    scene_object_name: "part"  # Name of the object in MoveIt planning scene
 
-# Mesh configuration
-mesh:
-  scene_object_name: "part"  # Name of the object in MoveIt planning scene
-
-# Camera configuration
-camera:
-  # Camera frame
-  frame: "tool0"  # Camera frame in TF tree
-  
-  # Geometric constraint settings
-  constraints:
-    # Maximum angle between triangle normal and camera view direction (degrees)
-    # Triangles with normals beyond this angle from the camera direction will be filtered out
-    max_normal_angle: 30.0
+  # Camera configuration
+  camera:
+    # Camera frame
+    frame: "tool0"  # Camera frame in TF tree
     
-    # Vertical distance constraints (along camera Z axis, in meters)
-    vertical_distance:
-      min: 0.1
-      max: 0.6
-    
-    # Horizontal distance constraints (perpendicular to camera Z axis, in meters)
-    # Maximum radial distance from camera optical axis
-    horizontal_distance:
-      max: 0.25
-  
-  # Sensing settings
-  sensing:
-    frame_rate: 10  # Publication rate in Hz (increased from 1 to 10)
-    
-    # Noise settings
-    noise:
-      # Base noise levels (standard deviation in meters, range 0-1)
-      horizontal: 0.003  # Noise in X-Y plane (perpendicular to camera axis)
-      vertical: 0.008    # Noise in Z direction (along camera axis)
+    # Geometric constraint settings
+    constraints:
+      # Maximum angle between triangle normal and camera view direction (degrees)
+      # Triangles with normals beyond this angle from the camera direction will be filtered out
+      max_normal_angle: 30.0
       
-      # Distance-based noise scaling (noise increases with distance)
-      distance_factor: 0.05  # How much to scale noise based on distance (0 = no scaling)
+      # Vertical distance constraints (along camera Z axis, in meters)
+      vertical_distance:
+        min: 0.1
+        max: 0.6
+      # Horizontal distance constraints (perpendicular to camera Z axis, in meters)
+      # Maximum radial distance from camera optical axis
+      horizontal_distance:
+        max: 0.25
+    
+    # Sensing settings
+    sensing:
+      frame_rate: 10  # Publication rate in Hz (increased from 1 to 10)
+      
+      # Noise settings
+      noise:
+        # Base noise levels (standard deviation in meters, range 0-1)
+        horizontal: 0.0  # Noise in X-Y plane (perpendicular to camera axis)
+        vertical: 0.0    # Noise in Z direction (along camera axis)
+        
+        # Distance-based noise scaling (noise increases with distance)
+        distance_factor: 0.0  # How much to scale noise based on distance (0 = no scaling)

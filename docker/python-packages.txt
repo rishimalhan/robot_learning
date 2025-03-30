@@ -18,3 +18,4 @@ meshio
 opencv-python-headless
 scipy
 rtree
+open3d
