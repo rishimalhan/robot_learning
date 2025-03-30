@@ -13,6 +13,8 @@ import std_msgs.msg
 from collections import deque
 from moveit_msgs.msg import CollisionObject
 from shape_msgs.msg import SolidPrimitive
+import traceback
+from geometry_msgs.msg import Pose, Point, Quaternion
 
 
 class PointCloudProcessor:
@@ -216,8 +218,6 @@ def get_robot_roi_bounds(env):
 
     # Get position and orientation from pose
     position = roi_object.pose.position
-    # Get orientation quaternion
-    orientation = roi_object.pose.orientation
 
     # Calculate bounds (half-width from center position)
     half_x, half_y, half_z = dimensions[0] / 2, dimensions[1] / 2, dimensions[2] / 2
@@ -253,8 +253,11 @@ def main():
         rospy.logerr("Required robot_roi object not found in the scene. Exiting.")
         return
 
+    # Initialize the pointcloud processor
+    PointCloudProcessor()
+
     try:
-        # Step 1: Move to home position first
+        # Step 1: Move to home position
         rospy.loginfo("Step 1: Moving to home position...")
         success, plan, planning_time, error_code = env.planner.plan_to_named_target(
             "home"
@@ -265,127 +268,90 @@ def main():
             rospy.logerr("Failed to plan to home position")
             return
 
-        # Step 2: Move down along tool Z by 0.25 meters
-        rospy.loginfo("Step 2: Moving down along tool Z by 0.25 meters...")
-        success, plan, planning_time, error_code = env.planner.plan_to_ee_offset(
-            direction=[0, 0, 1],
-            distance=0.25,
+        # Get current pose - we'll use this to calculate the z-offset
+        current_pose = env.planner.move_group.get_current_pose("tool0").pose
+        orientation = current_pose.orientation
+
+        # Calculate Z position with 0.25m lower than current
+        z_position = current_pose.position.z - 0.4
+
+        # Step 2: Set up zigzag pattern waypoints
+        rospy.loginfo("Step 2: Setting up zigzag pattern waypoints...")
+
+        # Define grid size
+        grid_points_x = 10  # Number of points in X direction
+        grid_points_y = 10  # Number of points in Y direction
+
+        # Calculate step sizes based on ROI bounds
+        x_min = roi_bounds["x_min"] + 0.2
+        x_max = roi_bounds["x_max"] - 0.2
+        y_min = roi_bounds["y_min"] + 0.3
+        y_max = roi_bounds["y_max"] - 0.3
+
+        step_x = (x_max - x_min) / max(1, grid_points_x - 1)
+        step_y = (y_max - y_min) / max(1, grid_points_y - 1)
+
+        # Generate zigzag waypoints
+        waypoints = []
+
+        for y_idx in range(grid_points_y):
+            # Determine if moving left-to-right or right-to-left
+            is_left_to_right = y_idx % 2 == 0
+
+            # Define x points based on direction
+            if is_left_to_right:
+                x_indices = range(grid_points_x)
+            else:
+                x_indices = range(grid_points_x - 1, -1, -1)
+
+            # Add waypoints for this row
+            for x_idx in x_indices:
+                # Calculate actual position
+                x_pos = x_min + x_idx * step_x
+                y_pos = y_min + y_idx * step_y
+
+                # Create pose with current orientation
+                pose = Pose()
+                pose.position.x = x_pos
+                pose.position.y = y_pos
+                pose.position.z = z_position
+                pose.orientation = orientation
+
+                waypoints.append(pose)
+
+        # Step 3: Execute zigzag pattern using cartesian path
+        rospy.loginfo(
+            f"Step 3: Executing zigzag pattern with {len(waypoints)} waypoints..."
+        )
+
+        # Plan cartesian path
+        plan, fraction, planning_time = env.planner.plan_cartesian_path(
+            waypoints=waypoints,
+            eef_step=0.001,
+            jump_threshold=False,  # Allow jumps for smoother path
+        )
+        rospy.loginfo(
+            f"Successfully planned {fraction:.1%} of the zigzag path in {planning_time:.2f} seconds"
+        )
+
+        # Execute the plan
+        executor.execute_plan(plan)
+
+        # Return to home position
+        rospy.loginfo("Returning to home position...")
+        success, plan, planning_time, error_code = env.planner.plan_to_named_target(
+            "home"
         )
         if success and plan:
             executor.execute_plan(plan)
-        else:
-            rospy.logerr("Failed to move down along Z. Exiting.")
-            return
-
-        # Initialize the pointcloud processor
-        pointcloud_processor = PointCloudProcessor()
-
-        # Step 3: Make random movements in X-Y plane within roi_bounds
-        rospy.loginfo(
-            "Step 3: Making random movements in X-Y plane within ROI bounds..."
-        )
-
-        # Number of random movements to perform
-        num_movements = 100
-        successful_movements = 0
-        max_attempts = 1000  # Prevent infinite loop if many movements fail
-
-        attempt = 0
-        while successful_movements < num_movements and attempt < max_attempts:
-            if rospy.is_shutdown():
-                rospy.loginfo("ROS shutdown detected. Exiting.")
-                break
-
-            attempt += 1
-            rospy.loginfo(
-                f"Attempting movement {attempt} (completed {successful_movements}/{num_movements})"
-            )
-
-            # Get current end effector pose
-            current_pose = env.planner.move_group.get_current_pose(
-                end_effector_link="tool0"
-            ).pose
-            current_x = current_pose.position.x
-            current_y = current_pose.position.y
-
-            # 1. Sample a random direction in X-Y plane
-            angle = random.uniform(0, 2 * math.pi)  # Random angle in radians
-            direction_x = math.cos(angle)
-            direction_y = math.sin(angle)
-
-            # 2. Sample a random distance between 0-0.3m
-            distance_x = random.uniform(0.05, 0.3)  # Random distance between 0.05-0.3m
-            distance_y = random.uniform(0.05, 0.8)  # Random distance between 0.05-0.3m
-
-            # 3. Calculate target position
-            target_x = current_x + (direction_x * distance_x)
-            target_y = current_y + (direction_y * distance_y)
-
-            # 4. Check if target is within ROI bounds
-            if (
-                target_x < roi_bounds["x_min"]
-                or target_x > roi_bounds["x_max"]
-                or target_y < roi_bounds["y_min"]
-                or target_y > roi_bounds["y_max"]
-            ):
-                rospy.loginfo("Target outside ROI bounds, trying again...")
-                continue
-
-            # Plan and execute movement in X-Y plane only
-            rospy.loginfo(
-                f"Planning in direction [{direction_x:.3f}, {direction_y:.3f}] for {distance_x:.3f}m, {distance_y:.3f}m"
-            )
-            success, plan, planning_time, error_code = env.planner.plan_to_ee_offset(
-                direction=[direction_x, direction_y, 0],
-                distance=np.linalg.norm(
-                    [direction_x * distance_x, direction_y * distance_y]
-                ),
-            )
-
-            if success and plan:
-                executor.execute_plan(plan)
-                # Only create pointcloud after movement completes
-                pointcloud_processor.create_augmented_pointcloud()
-                successful_movements += 1
-                rospy.loginfo(
-                    f"Successfully completed movement {successful_movements}/{num_movements}"
-                )
-            else:
-                rospy.logwarn(
-                    f"Failed to plan movement in direction [{direction_x:.3f}, {direction_y:.3f}]"
-                )
-
-            # Check for ctrl+c between movements
-            if rospy.is_shutdown():
-                rospy.loginfo("Ctrl+C detected. Stopping movements.")
-                break
-
-            # Small delay between movements
-            rospy.sleep(0.5)
-
-        if successful_movements < num_movements and not rospy.is_shutdown():
-            rospy.logwarn(
-                f"Could only complete {successful_movements}/{num_movements} movements after {attempt} attempts"
-            )
-
-        # Return to home position
-        if not rospy.is_shutdown():
-            rospy.loginfo("Returning to home position...")
-            success, plan, planning_time, error_code = env.planner.plan_to_named_target(
-                "home"
-            )
-            if success and plan:
-                executor.execute_plan(plan)
-                pointcloud_processor.create_augmented_pointcloud()
 
     except rospy.ROSInterruptException:
         rospy.loginfo("Program interrupted by user")
     except Exception as e:
         rospy.logerr(f"Error during execution: {str(e)}")
+        rospy.logerr(f"Exception details: {traceback.format_exc()}")
     finally:
         rospy.loginfo("Clean shutdown. Exiting.")
-
-    # No rospy.spin() to make it easier to interrupt
 
 
 if __name__ == "__main__":
