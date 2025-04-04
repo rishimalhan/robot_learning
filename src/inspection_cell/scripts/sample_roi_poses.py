@@ -6,6 +6,7 @@ import math
 from tf.transformations import (
     quaternion_from_euler,
     quaternion_multiply,
+    quaternion_from_matrix,
 )
 import traceback
 import argparse
@@ -205,68 +206,72 @@ class PoseSampler:
             rospy.logerr(f"Position outside ROI bounds: ({x:.3f}, {y:.3f}, {z:.3f})")
             return None
 
-        # Create orientation based on cone sampling
+        # Create orientation based on sampling Z first, then X, then Y
         # Clamp max_angle to valid range [0, pi]
         max_angle = max(0, min(math.pi, max_angle))
 
-        # Sample orientation within a cone around -Z axis
-        # First, sample a random deviation angle between 0 and max_angle
+        # First sample Z direction within cone around [0,0,-1]
+        # Sample random deviation angle and azimuth
         deviation_angle = random.uniform(0, max_angle)
-
-        # Then sample a random direction within that cone by picking a random azimuth
         azimuth = random.uniform(0, 2 * math.pi)
 
-        # Convert spherical coordinates to Cartesian (radius=1)
-        # For a cone around -Z, we use:
-        #   x = sin(deviation_angle) * cos(azimuth)
-        #   y = sin(deviation_angle) * sin(azimuth)
-        #   z = -cos(deviation_angle)  # negative because we want -Z direction
-        dx = math.sin(deviation_angle) * math.cos(azimuth)
-        dy = math.sin(deviation_angle) * math.sin(azimuth)
-        dz = -math.cos(deviation_angle)
+        # Convert to Cartesian coordinates to get Z direction
+        z_x = math.sin(deviation_angle) * math.cos(azimuth)
+        z_y = math.sin(deviation_angle) * math.sin(azimuth)
+        z_z = -math.cos(deviation_angle)  # Negative because we want -Z direction
 
-        # Convert this direction vector to a quaternion
-        # First, compute the rotation from [0,0,-1] to [dx,dy,dz]
-        # We can use the formula for quaternion from two vectors
+        # Normalize Z vector
+        z_norm = math.sqrt(z_x * z_x + z_y * z_y + z_z * z_z)
+        z_x /= z_norm
+        z_y /= z_norm
+        z_z /= z_norm
 
-        # Get rotation axis by cross product of [0,0,-1] and [dx,dy,dz]
-        # If vectors are nearly parallel, use a default axis [1,0,0]
-        if abs(deviation_angle) < 1e-6:
-            # Nearly vertical, use identity quaternion
-            q = [0, 0, 0, 1]  # w is last
-        else:
-            # Get rotation axis (cross product of [0,0,-1] and [dx,dy,dz])
-            axis_x = -dy  # cross product: [0,0,-1] × [dx,dy,dz] = [-dy, dx, 0]
-            axis_y = dx
-            axis_z = 0
+        # Sample random angle for X direction in plane perpendicular to Z
+        x_angle = random.uniform(0, 2 * math.pi)
 
-            # Normalize the axis
-            axis_norm = math.sqrt(axis_x * axis_x + axis_y * axis_y + axis_z * axis_z)
-            if axis_norm > 1e-6:  # Avoid division by zero
-                axis_x /= axis_norm
-                axis_y /= axis_norm
-                axis_z /= axis_norm
+        # Get arbitrary vector not parallel to Z
+        temp_x = 1.0
+        temp_y = 0.0
+        temp_z = 0.0
+        if abs(z_x) > 0.9:  # If Z is close to X axis, use Y axis instead
+            temp_x = 0.0
+            temp_y = 1.0
+            temp_z = 0.0
 
-            # Get the rotation angle
-            # Compute using dot product: cos(angle) = v1·v2 / (|v1|·|v2|)
-            # Since both vectors are unit vectors, |v1|·|v2| = 1
-            # dot product of [0,0,-1] and [dx,dy,dz] is -dz
-            cos_angle = -dz  # dot product of [0,0,-1] and [dx,dy,dz]
-            angle = math.acos(cos_angle)
+        # Get perpendicular vector using cross product
+        px = temp_y * z_z - temp_z * z_y
+        py = temp_z * z_x - temp_x * z_z
+        pz = temp_x * z_y - temp_y * z_x
 
-            # Convert axis-angle to quaternion
-            sin_half_angle = math.sin(angle / 2)
-            cos_half_angle = math.cos(angle / 2)
+        # Normalize perpendicular vector
+        p_norm = math.sqrt(px * px + py * py + pz * pz)
+        px /= p_norm
+        py /= p_norm
+        pz /= p_norm
 
-            q = [
-                axis_x * sin_half_angle,  # x
-                axis_y * sin_half_angle,  # y
-                axis_z * sin_half_angle,  # z
-                cos_half_angle,  # w
+        # Rotate perpendicular vector around Z by x_angle to get X direction
+        cos_a = math.cos(x_angle)
+        sin_a = math.sin(x_angle)
+        x_x = px * cos_a + (z_y * pz - z_z * py) * sin_a
+        x_y = py * cos_a + (z_z * px - z_x * pz) * sin_a
+        x_z = pz * cos_a + (z_x * py - z_y * px) * sin_a
+
+        # Get Y direction by cross product of Z and X
+        y_x = z_y * x_z - z_z * x_y
+        y_y = z_z * x_x - z_x * x_z
+        y_z = z_x * x_y - z_y * x_x
+
+        # Convert rotation matrix to quaternion using tf.transformations
+        q = quaternion_from_matrix(
+            [
+                [x_x, x_y, x_z, 0.0],
+                [y_x, y_y, y_z, 0.0],
+                [z_x, z_y, z_z, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
             ]
+        )
 
         # Account for the TCP's 1 radian tilt around X if needed
-        # Apply an additional rotation around X axis
         tcp_tilt = (
             0.0  # Set to 0 if no TCP tilt compensation needed, or to -1.0 if needed
         )
