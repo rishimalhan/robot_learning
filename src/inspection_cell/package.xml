@@ -56,6 +56,9 @@
   <build_depend>std_msgs</build_depend>
   <build_depend>neural_engine</build_depend>
   <build_depend>rospkg</build_depend>
+  <build_depend>tf2_ros</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>rviz_tools_py</build_depend>
   <build_export_depend>rospy</build_export_depend>
   <exec_depend>rospy</exec_depend>
   <exec_depend>abb_irb2400_support</exec_depend>
@@ -64,7 +67,9 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>neural_engine</exec_depend>
   <exec_depend>rospkg</exec_depend>
-
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>rviz_tools_py</exec_depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

@@ -125,8 +125,8 @@ Visualization Manager:
         Use Sim Time: true
       Planning Metrics:
         Payload: 1
-        Show Joint Torques: true
-        Show Manipulability: true
+        Show Joint Torques: false
+        Show Manipulability: false
         Show Manipulability Index: false
         Show Weight Limit: false
         TextHeight: 0.07999999821186066
@@ -271,6 +271,14 @@ Visualization Manager:
         {}
       Queue Size: 100
       Value: false
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: viz
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

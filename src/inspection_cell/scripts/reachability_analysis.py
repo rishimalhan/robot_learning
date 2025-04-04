@@ -94,24 +94,17 @@ class ReachabilityAnalysis:
         # 5. Tool Z at -30 degrees in roll from vertical
 
         # Convert degrees to radians
-        angle_rad = math.radians(30)
-
-        # For tool Z pointing down, we need:
-        # - Roll can be 0
-        # - Pitch should be pi/2 (90 degrees) for Z down
-        # - Yaw can be 0
-
+        angle_rad = math.radians(60)
         orientations = [
-            # 1. Z down (vertical)
             (0, math.pi / 2, 0),
-            # 2. +30 degrees in pitch
             (0, math.pi / 2 + angle_rad, 0),
-            # 3. -30 degrees in pitch
+            (0, math.pi / 2 + angle_rad / 2, 0),
             (0, math.pi / 2 - angle_rad, 0),
-            # 4. +30 degrees in roll
+            (0, math.pi / 2 - angle_rad / 2, 0),
             (angle_rad, math.pi / 2, 0),
-            # 5. -30 degrees in roll
+            (angle_rad / 2, math.pi / 2, 0),
             (-angle_rad, math.pi / 2, 0),
+            (-angle_rad / 2, math.pi / 2, 0),
         ]
 
         reachable_count = 0
@@ -296,7 +289,7 @@ def main():
     parser.add_argument(
         "--samples",
         type=int,
-        default=4,
+        default=12,
         help="Number of samples per dimension (total positions = samples^3)",
     )
 

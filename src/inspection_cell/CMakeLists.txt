@@ -14,6 +14,7 @@ find_package(catkin REQUIRED COMPONENTS
   abb_irb2400_moveit_config
   neural_engine
   message_generation
+  rviz_tools_py
 )
 
 ## System dependencies are found with CMake's conventions
@@ -170,7 +171,6 @@ catkin_install_python(PROGRAMS
   src/inspection_cell/load_system.py
   src/inspection_cell/planner.py
   src/inspection_cell/executor.py
-  src/inspection_cell/simulated_perception.py
   src/inspection_cell/point_cloud_processor.py
   scripts/test_move_robot.py
   scripts/test_collision_checker.py

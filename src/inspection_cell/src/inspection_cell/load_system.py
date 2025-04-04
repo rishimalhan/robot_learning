@@ -4,9 +4,9 @@
 
 import rospy
 import os
-from tf.transformations import quaternion_from_euler
+from tf.transformations import quaternion_from_euler, quaternion_multiply
 from moveit_commander import MoveGroupCommander, PlanningSceneInterface, RobotCommander
-from geometry_msgs.msg import Pose, Point, Quaternion
+from geometry_msgs.msg import Pose, Point, Quaternion, PoseStamped
 from moveit_msgs.msg import CollisionObject
 from shape_msgs.msg import SolidPrimitive
 import rospkg
@@ -19,7 +19,10 @@ from moveit_msgs.msg import (
 )
 from moveit_msgs.srv import ApplyPlanningScene
 from std_msgs.msg import ColorRGBA
-from inspection_cell.planner import Planner
+import tf2_ros
+import geometry_msgs.msg
+import ros_numpy
+import numpy as np
 
 # Internal
 
@@ -29,6 +32,8 @@ from inspection_cell.utils import (
     get_param,
 )
 from inspection_cell.collision_checker import CollisionCheck
+from inspection_cell.planner import Planner
+from inspection_cell.executor import Executor
 
 
 class EnvironmentLoader:
@@ -44,26 +49,39 @@ class EnvironmentLoader:
         self.robot = RobotCommander()
         self.group_name = move_group_name
         self.planner = Planner()
+        self.executor = Executor()
+
+        # Initialize TF buffer and listener
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
         # Create RosPack instance
         self.rospack = rospkg.RosPack()
 
         # Get the planning frame
         self.planning_frame = self.move_group.get_planning_frame()
-        rospy.loginfo(f"Planning frame: {self.planning_frame}")
+        rospy.loginfo(
+            f"Planning frame or coordinate frame in which motion planning is performed: {self.planning_frame}"
+        )
 
-        # Fix any self-collision issues
-        self._ensure_acm_applied()
+        # Initialize TCP transform cache
+        self.tcp_transform = None
 
         # Clear the planning scene if requested
         if clear_scene:
             self.clear_scene()
-
-        # Load environment configuration
+        # Load environment configuration first
         self._load_config()
-
-        # Configure robot parameters
-        self._configure_robot()
-
+        # Attach tool if configured
+        self._attach_tool()
+        # Ensure TCP transform is set up
+        tool_config = get_param("/environment/tool", None)
+        if tool_config and "tcp" in tool_config:
+            self._setup_tcp_frame(tool_config)
+        else:
+            rospy.logwarn("No TCP configuration found in tool config")
+        # Fix any self-collision issues
+        self._ensure_acm_applied()
         # Add objects to scene
         self._add_objects_to_scene()
 
@@ -581,15 +599,169 @@ class EnvironmentLoader:
                     f"Object '{name}' has collision DISABLED with {len(disabled_with)} other objects/links"
                 )
 
+    def _attach_tool(self):
+        """Attach a mesh tool to the robot's tool0 frame if configured."""
+        tool_config = get_param("/environment/tool", None)
+        if not tool_config:
+            rospy.loginfo("No tool configuration found, skipping tool attachment")
+            return
+
+        rospy.loginfo("Attaching tool to robot's tool0 frame...")
+
+        # Get the end effector link
+        eef_link = self.move_group.get_end_effector_link()
+        rospy.loginfo(f"Attaching tool to end effector link: {eef_link}")
+
+        # Get all links in the manipulator group for touch_links
+        touch_links = self.robot.get_link_names(group=self.group_name)
+
+        # Create pose for the tool
+        pose = PoseStamped()
+        pose.header.frame_id = eef_link
+        pose.pose.position = Point(*tool_config["pose"]["position"])
+
+        # Convert euler angles to quaternion
+        euler = tool_config["pose"]["orientation"]
+        q = quaternion_from_euler(*euler)
+        pose.pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
+
+        # Resolve the mesh path
+        mesh_path = resolve_package_path(tool_config["mesh_path"])
+
+        # Attach the mesh tool
+        self.scene.attach_mesh(
+            eef_link,
+            "tool",
+            pose=pose,
+            filename=mesh_path,
+            size=tool_config["scale"],
+            touch_links=touch_links,
+        )
+
+        # Wait for attachment with timeout
+        timeout = 4.0  # seconds
+        start = rospy.get_time()
+        seconds = rospy.get_time()
+        while (seconds - start < timeout) and not rospy.is_shutdown():
+            # Test if the tool is in attached objects
+            attached_objects = self.scene.get_attached_objects(["tool"])
+            is_attached = len(attached_objects.keys()) > 0
+
+            # Test if the tool is in the scene
+            is_known = "tool" in self.scene.get_known_object_names()
+
+            # Test if we are in the expected state
+            if is_attached and not is_known:
+                rospy.loginfo(f"Successfully attached tool to {eef_link}")
+                # Set up TCP frame after tool attachment
+                self._setup_tcp_frame(tool_config)
+                return True
+
+            # Sleep so that we give other threads time on the processor
+            rospy.sleep(0.1)
+            seconds = rospy.get_time()
+
+        rospy.logerr(f"Failed to attach tool to {eef_link} within {timeout} seconds")
+        return False
+
+    def _setup_tcp_frame(self, tool_config):
+        """Set up the Tool Center Point (TCP) frame for MoveIt.
+
+        Args:
+            tool_config: Tool configuration dictionary containing TCP pose
+        """
+        if "tcp" not in tool_config:
+            rospy.logwarn("No TCP configuration found in tool config")
+            return
+
+        tcp_config = tool_config["tcp"]
+        if "pose" not in tcp_config:
+            rospy.logwarn("No TCP pose configuration found")
+            return
+
+        # Get the end effector link
+        eef_link = self.move_group.get_end_effector_link()
+
+        # Create TCP pose
+        tcp_pose = Pose()
+        tcp_position = tcp_config["pose"]["position"]
+        tcp_pose.position.x = tcp_position[0]
+        tcp_pose.position.y = tcp_position[1]
+        tcp_pose.position.z = tcp_position[2]
+
+        # Set orientation
+        tcp_orientation = tcp_config["pose"]["orientation"]
+        q = quaternion_from_euler(*tcp_orientation)
+        tcp_pose.orientation.x = q[0]
+        tcp_pose.orientation.y = q[1]
+        tcp_pose.orientation.z = q[2]
+        tcp_pose.orientation.w = q[3]
+
+        # Cache the TCP transform
+        self.tcp_transform = ros_numpy.numpify(tcp_pose)
+
+        # Create static transform broadcaster
+        static_broadcaster = tf2_ros.StaticTransformBroadcaster()
+
+        # Create transform message
+        transform = geometry_msgs.msg.TransformStamped()
+        transform.header.stamp = rospy.Time.now()
+        transform.header.frame_id = eef_link
+        transform.child_frame_id = "tcp"
+
+        # Set translation
+        transform.transform.translation.x = tcp_position[0]
+        transform.transform.translation.y = tcp_position[1]
+        transform.transform.translation.z = tcp_position[2]
+
+        # Set rotation
+        transform.transform.rotation.x = q[0]
+        transform.transform.rotation.y = q[1]
+        transform.transform.rotation.z = q[2]
+        transform.transform.rotation.w = q[3]
+
+        # Send the transform
+        static_broadcaster.sendTransform(transform)
+
+        rospy.loginfo(
+            f"Set TCP pose relative to {eef_link} in MoveIt and published to TF tree"
+        )
+
+    def get_end_effector_transform(self, pose):
+        """
+        Get the end-effector transform for given target.
+
+        Args:
+            pose: The pose from target to world or TCP to world
+        Returns:
+            The transformed pose (same type as input)
+        """
+        if self.tcp_transform is None:
+            rospy.logwarn("TCP transform not set up")
+            return pose
+
+        # Convert to Pose if PoseStamped
+        if isinstance(pose, PoseStamped):
+            pose = pose.pose
+
+        target = ros_numpy.numpify(pose)  # target to world
+        # Get end-effector to tcp
+        # w_T_e = w_T_t * t_T_e
+        return ros_numpy.geometry.numpy_to_pose(
+            np.matmul(target, np.linalg.inv(self.tcp_transform))
+        )
+
 
 def main():
     try:
         # Initialize environment loader
-        env_loader = EnvironmentLoader()
+        env = EnvironmentLoader()
 
         # Keep the node running
         rospy.loginfo("Environment loader is running. Press Ctrl+C to exit.")
-        rospy.spin()
+        from IPython import embed
+
+        embed()
 
     except ImportError as e:
         rospy.logerr(f"Missing required package: {e}")
@@ -599,8 +771,8 @@ def main():
     finally:
         try:
             # Attempt to clear scene before exiting
-            if "env_loader" in locals():
-                env_loader.clear_scene()
+            if "env" in locals():
+                env.clear_scene()
         except:
             pass
 

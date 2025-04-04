@@ -72,6 +72,71 @@ class Executor:
             rospy.logerr(f"Execution failed with error: {str(e)}")
             return False
 
+    def move_to_home(self, planner=None):
+        """
+        Move the robot to the home position.
+
+        This method handles both planning and execution of the motion to home.
+        If a planner is provided, it will be used for planning. Otherwise,
+        this method assumes that planner functionality is already integrated
+        with the move_group.
+
+        Args:
+            planner: An optional Planner instance to use for planning.
+                    If None, uses the move_group directly.
+
+        Returns:
+            bool: True if the motion was successful, False otherwise.
+        """
+        rospy.loginfo("Moving to home position...")
+
+        # Get available named targets
+        named_targets = self.move_group.get_named_targets()
+
+        # Check if we're using an external planner or direct move_group planning
+        if planner:
+            # Use the provided planner
+            if "home" in named_targets:
+                # Plan to the named target
+                success, plan, planning_time, error_code = planner.plan_to_named_target(
+                    "home"
+                )
+            else:
+                # Plan to home
+                success, plan, planning_time, error_code = planner.plan_to_home()
+
+            if not success or not plan:
+                rospy.logwarn("Failed to plan to home position")
+                return False
+
+            # Execute the plan
+            return self.execute_plan(plan)
+        else:
+            # Plan and execute directly with move_group
+            try:
+                if "home" in named_targets:
+                    self.move_group.set_named_target("home")
+                    rospy.loginfo("Planning and moving to 'home' target")
+                else:
+                    # If no "home" target available, use the default home position
+                    rospy.loginfo("No 'home' target found, using robot-specific home")
+                    self.move_group.set_named_target("home")
+
+                # Plan and execute in one go
+                success = self.move_group.go(wait=True)
+
+                # Report results
+                if success:
+                    rospy.loginfo("Successfully moved to home position")
+                else:
+                    rospy.logwarn("Failed to move to home position")
+
+                return success
+
+            except Exception as e:
+                rospy.logerr(f"Error moving to home: {str(e)}")
+                return False
+
     def stop_execution(self):
         """
         Stop any ongoing motion execution.
@@ -105,17 +170,13 @@ if __name__ == "__main__":
     planner = Planner()
     executor = Executor()
 
-    # Plan and execute a motion to the home position
-    success, plan, planning_time, error_code = planner.plan_to_home()
+    # Test the move_to_home functionality
+    rospy.loginfo("Testing move_to_home with planner...")
+    success = executor.move_to_home(planner)
 
     if success:
-        rospy.loginfo("Planning succeeded, executing...")
-        execution_success = executor.execute_plan(plan)
-        if execution_success:
-            rospy.loginfo("Execution succeeded!")
-        else:
-            rospy.logerr("Execution failed!")
+        rospy.loginfo("Move to home succeeded!")
     else:
-        rospy.logerr("Planning failed!")
+        rospy.logerr("Move to home failed!")
 
     rospy.spin()

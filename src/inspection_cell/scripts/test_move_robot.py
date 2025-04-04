@@ -11,7 +11,7 @@ import traceback
 
 # Internal
 
-from inspection_cell.utils import get_robot_roi_bounds
+from inspection_cell.utils import get_robot_roi_bounds, get_param
 
 
 def main():
@@ -19,6 +19,26 @@ def main():
     rospy.init_node("test_robot_motion_node", anonymous=True)
     env = EnvironmentLoader()
     executor = Executor()
+
+    import sys
+
+    sys.exit()
+
+    joint_goals = get_param("/environment/joint_goals", None)
+
+    if joint_goals:
+        success, plan, planning_time, error_code = env.planner.plan_to_joint_target(
+            joint_goals[0]
+        )
+        if success and plan:
+            executor.execute_plan(plan)
+        else:
+            rospy.logerr("Failed to plan to joint goal")
+            return
+
+    import sys
+
+    sys.exit()
 
     # Get the robot_roi bounds
     roi_bounds = get_robot_roi_bounds(env)

@@ -1,7 +1,9 @@
 <launch>
   <!-- The planning and execution components of MoveIt! configured to run -->
   <!-- using the ROS-Industrial interface. -->
- 
+  
+  <rosparam command="load" file="$(find inspection_cell)/config/environment.yaml"/>
+
   <!-- Non-standard joint names:
        - Create a file [robot_moveit_config]/config/joint_names.yaml
            controller_joint_names: [joint_1, joint_2, ... joint_N] 
