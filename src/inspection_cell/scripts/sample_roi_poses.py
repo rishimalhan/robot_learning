@@ -15,6 +15,8 @@ from geometry_msgs.msg import Pose, Point, Quaternion, Vector3
 from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.msg import PlanningScene
 import rviz_tools_py as viz
+import tf2_ros
+import geometry_msgs.msg
 
 
 class PoseSampler:
@@ -32,6 +34,9 @@ class PoseSampler:
 
         # Initialize rviz_tools for visualization
         self.markers = viz.RvizMarkers("world", "viz")
+
+        # Initialize TF broadcaster for pose visualization
+        self.tf_broadcaster = tf2_ros.StaticTransformBroadcaster()
 
         # Create publishers for visualization
         self.planning_scene_pub = rospy.Publisher(
@@ -151,6 +156,44 @@ class PoseSampler:
             diameter = 0.025
             color = "green" if successful else "red"
             self.markers.publishSphere(pose, color, diameter, lifetime)
+
+        # Publish TF frames for the pose and end-effector pose
+        transforms = []
+
+        # Create transform for TCP pose
+        tcp_transform = geometry_msgs.msg.TransformStamped()
+        tcp_transform.header.stamp = rospy.Time.now()
+        tcp_transform.header.frame_id = "world"
+        tcp_transform.child_frame_id = "sampled_pose"
+
+        # Set translation and rotation from the input pose
+        tcp_transform.transform.translation.x = pose.position.x
+        tcp_transform.transform.translation.y = pose.position.y
+        tcp_transform.transform.translation.z = pose.position.z
+        tcp_transform.transform.rotation = pose.orientation
+        transforms.append(tcp_transform)
+
+        # Get end-effector pose
+        eef_pose = self.env.get_end_effector_transform(pose)
+
+        # Create transform for end-effector pose
+        eef_transform = geometry_msgs.msg.TransformStamped()
+        eef_transform.header.stamp = rospy.Time.now()
+        eef_transform.header.frame_id = "world"
+        eef_transform.child_frame_id = "eef_pose"
+
+        # Set translation and rotation
+        eef_transform.transform.translation.x = eef_pose.position.x
+        eef_transform.transform.translation.y = eef_pose.position.y
+        eef_transform.transform.translation.z = eef_pose.position.z
+        eef_transform.transform.rotation = eef_pose.orientation
+        transforms.append(eef_transform)
+
+        # Send the transforms using the class member broadcaster
+        self.tf_broadcaster.sendTransform(transforms)
+
+        # Also visualize the end-effector pose with a different color
+        self.markers.publishAxis(eef_pose, axis_length * 0.8, axis_radius, lifetime)
 
     def sample_pose_within_roi(self, max_angle=math.pi / 6):
         """
