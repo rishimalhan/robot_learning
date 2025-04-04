@@ -45,6 +45,7 @@ class PoseSampler:
 
         # Get the robot_roi information from the config
         self.roi_info = self._get_roi_info()
+
         rospy.loginfo("PoseSampler initialized")
 
     def _get_roi_info(self):
@@ -80,7 +81,7 @@ class PoseSampler:
         # Get dimensions from primitive
         dimensions = list(roi_object.primitives[0].dimensions)
 
-        # Get pose from primitive pose
+        # Get pose from primitive
         position = roi_object.primitive_poses[0].position
         orientation = roi_object.primitive_poses[0].orientation
 
@@ -97,10 +98,8 @@ class PoseSampler:
             )
 
             # Try to get position from environment configuration
-            if "robot_roi" in self.env.config["objects"]:
-                config_position = self.env.config["objects"]["robot_roi"]["pose"][
-                    "position"
-                ]
+            if "robot_roi" in self.env.config:
+                config_position = self.env.config["robot_roi"]["pose"]["position"]
                 rospy.loginfo(
                     f"Found robot_roi in config with position: {config_position}"
                 )
@@ -458,7 +457,7 @@ def main():
         parser.add_argument(
             "--num-poses",
             type=int,
-            default=10,
+            default=5,
             help="Number of successful poses to find",
         )
         parser.add_argument(

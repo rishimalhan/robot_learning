@@ -26,41 +26,14 @@ class Planner:
         self.group_name = move_group_name
 
         # Set some default planning parameters
-        self.move_group.set_planning_time(5.0)  # seconds
-        self.move_group.set_num_planning_attempts(10)
-        self.move_group.set_max_velocity_scaling_factor(0.5)  # 50% of max velocity
-        self.move_group.set_max_acceleration_scaling_factor(
-            0.3
-        )  # 30% of max acceleration
+        self.move_group.set_planning_time(1.0)  # seconds
+        self.move_group.set_num_planning_attempts(1)
+        self.move_group.set_max_velocity_scaling_factor(1.0)
+        self.move_group.set_max_acceleration_scaling_factor(1.0)
 
         rospy.loginfo(f"Planner initialized for group: {move_group_name}")
         rospy.loginfo(f"Planning frame: {self.move_group.get_planning_frame()}")
         rospy.loginfo(f"End effector link: {self.move_group.get_end_effector_link()}")
-
-    def set_planning_parameters(
-        self,
-        planning_time=None,
-        num_attempts=None,
-        velocity_factor=None,
-        acceleration_factor=None,
-    ):
-        """
-        Set planning parameters.
-
-        Args:
-            planning_time: Planning time in seconds
-            num_attempts: Number of planning attempts
-            velocity_factor: Velocity scaling factor (0.0 to 1.0)
-            acceleration_factor: Acceleration scaling factor (0.0 to 1.0)
-        """
-        if planning_time is not None:
-            self.move_group.set_planning_time(planning_time)
-        if num_attempts is not None:
-            self.move_group.set_num_planning_attempts(num_attempts)
-        if velocity_factor is not None:
-            self.move_group.set_max_velocity_scaling_factor(velocity_factor)
-        if acceleration_factor is not None:
-            self.move_group.set_max_acceleration_scaling_factor(acceleration_factor)
 
     def get_current_joint_values(self):
         """

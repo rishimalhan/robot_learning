@@ -37,38 +37,98 @@ class CollisionCheck:
         self.log_collision_bodies()
 
     def log_collision_bodies(self):
-        """Log all collision bodies currently in the planning scene"""
-        rospy.loginfo("Logging active collision bodies in planning scene:")
-
-        # Get all links in the robot
-        robot_links = self.robot.get_link_names()
-        rospy.loginfo("Robot links (%d):", len(robot_links))
-        for link in robot_links:
-            rospy.loginfo(f"  - {link}")
+        """Log collision bodies in the planning scene with clear categorization"""
+        rospy.loginfo("=============== COLLISION CONFIGURATION ===============")
 
         # Get all collision objects in the world
         try:
             # Create planning scene interface to get objects
             scene = moveit_commander.PlanningSceneInterface()
-            # Wait a bit for the interface to connect
-            rospy.sleep(0.5)
+            rospy.sleep(0.5)  # Allow interface to connect
 
             # Get objects and attached objects
             world_objects = scene.get_objects()
             attached_objects = scene.get_attached_objects()
 
-            rospy.loginfo("World objects (%d):", len(world_objects))
-            for obj_name in world_objects:
-                rospy.loginfo(f"  - {obj_name}")
+            # Get disabled collision objects from environment configuration
+            disabled_objects = []
+            try:
+                env_config = rospy.get_param("/environment")
+                for name, config in env_config.items():
+                    if name in world_objects and not config.get(
+                        "collision_enabled", True
+                    ):
+                        disabled_objects.append(name)
+            except Exception as e:
+                rospy.logwarn(f"Error getting disabled objects from config: {e}")
 
-            rospy.loginfo("Attached objects (%d):", len(attached_objects))
-            for obj_name in attached_objects:
-                rospy.loginfo(f"  - {obj_name}")
+            # Get active objects (those not in disabled list)
+            active_objects = [
+                name for name in world_objects if name not in disabled_objects
+            ]
+
+            # Get robot links
+            robot_links = self.robot.get_link_names()
+
+            # Print a neat summary
+            rospy.loginfo(f"Robot: {len(robot_links)} links")
+
+            rospy.loginfo(f"Active Collision Objects ({len(active_objects)}):")
+            for obj in active_objects:
+                rospy.loginfo(f"  • {obj}")
+
+            rospy.loginfo(f"Disabled Collision Objects ({len(disabled_objects)}):")
+            for obj in disabled_objects:
+                rospy.loginfo(f"  • {obj}")
+
+            rospy.loginfo(f"Attached Objects ({len(attached_objects)}):")
+            for obj in attached_objects:
+                rospy.loginfo(f"  • {obj}")
+
+            rospy.loginfo("=====================================================")
 
         except Exception as e:
             rospy.logwarn(f"Error getting collision objects: {e}")
 
-        rospy.loginfo("Collision body logging complete")
+    def _get_current_acm(self):
+        """Get the current Allowed Collision Matrix from the planning scene."""
+        try:
+            rospy.wait_for_service("/get_planning_scene", timeout=1.0)
+            from moveit_msgs.srv import GetPlanningScene
+            from moveit_msgs.msg import PlanningSceneComponents
+
+            get_planning_scene = rospy.ServiceProxy(
+                "/get_planning_scene", GetPlanningScene
+            )
+
+            # Create proper PlanningSceneComponents message
+            components = PlanningSceneComponents()
+            components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+
+            # Call with the proper message
+            response = get_planning_scene(components)
+            return response.scene.allowed_collision_matrix
+        except Exception as e:
+            rospy.logwarn(f"Failed to get ACM: {e}")
+            return None
+
+    def check_collision(self, joint_values=None):
+        """
+        Check if a robot state is in collision with the environment.
+        This is a compatibility method that returns results in the same format
+        as the original method from EnvironmentLoader.
+
+        Args:
+            joint_values: Optional list of joint values to check. If None, the current state is checked.
+
+        Returns:
+            tuple: (is_valid, contacts) where is_valid is a boolean and contacts is a list of collision contacts
+        """
+        # Use the state validity checker
+        is_valid = self.check_state_validity(joint_values)
+
+        # Return the result and contacts in the expected format
+        return is_valid, self.last_contacts
 
     def check_state_validity(self, joint_values=None):
         """
