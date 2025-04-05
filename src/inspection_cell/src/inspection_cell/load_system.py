@@ -413,15 +413,11 @@ class EnvironmentLoader:
 
             # Now disable collisions for objects that need it
             for obj_name in collision_disabled_objects:
-                # Disable self-collision for this object
-                acm = self._disable_collision_between(obj_name, obj_name, current_acm)
-
                 # Disable collision with everything else in scene
-                for other_obj_name in objects.keys():
-                    if other_obj_name != obj_name:
-                        acm = self._disable_collision_between(
-                            obj_name, other_obj_name, current_acm
-                        )
+                for other_obj_name in current_acm.entry_names:
+                    acm = self._disable_collision_between(
+                        obj_name, other_obj_name, current_acm
+                    )
 
             # Apply the updated ACM with new objects
             self._apply_acm(acm)
