@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# Internal
+
 import rospy
 import random
 import math
@@ -7,6 +9,7 @@ import threading
 import queue
 import asyncio
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from tf.transformations import (
     quaternion_from_euler,
     quaternion_multiply,
@@ -14,7 +17,6 @@ from tf.transformations import (
 )
 import traceback
 import argparse
-from inspection_cell.load_system import EnvironmentLoader
 from geometry_msgs.msg import Pose, Point, Quaternion, Vector3, TransformStamped
 from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.msg import PlanningScene
@@ -23,6 +25,11 @@ import tf2_ros
 import ros_numpy
 import numpy as np
 import time
+
+
+# External
+
+from inspection_cell.load_system import EnvironmentLoader
 
 
 class PoseSampler:
@@ -34,9 +41,9 @@ class PoseSampler:
         self.sampled_poses = []
         self.successful_poses = []
 
-        # Setup queues for parallelism
-        self.planning_queue = queue.Queue(maxsize=10)  # Queue of poses to plan
-        self.execution_queue = queue.Queue(maxsize=10)  # Queue of plans to execute
+        # Setup queues for parallelism with increased capacity
+        self.planning_queue = queue.Queue(maxsize=20)  # Increased queue size
+        self.execution_queue = queue.Queue(maxsize=20)  # Increased queue size
 
         # Lock for visualization
         self.viz_lock = threading.Lock()
@@ -53,6 +60,13 @@ class PoseSampler:
         # Flag for TF visualization - only show for executing poses
         self.show_tf = False
         self.current_executing_pose = None
+
+        # Optimization flags
+        self.viz_update_rate = rospy.Rate(10)  # 10Hz max update rate for visualization
+        self.high_performance_mode = True
+
+        # Visualization request queue for non-blocking viz
+        self.viz_queue = queue.Queue(maxsize=10)
 
         # Initialize the environment loader
         rospy.loginfo("Loading environment...")
@@ -72,80 +86,56 @@ class PoseSampler:
         # Get the robot_roi information from the config
         self.roi_info = self._get_roi_info()
 
+        # Start visualization thread
+        self.viz_thread = threading.Thread(
+            target=self._visualization_worker, daemon=True
+        )
+        self.viz_thread.start()
+
         rospy.loginfo("PoseSampler initialized")
 
-    def _get_roi_info(self):
-        """Extract information about the robot_roi region directly from the planning scene"""
-        rospy.loginfo("Retrieving robot_roi information from planning scene...")
+    def _visualization_worker(self):
+        """Dedicated thread for handling visualization requests"""
+        while not self.shutdown_event.is_set():
+            try:
+                # Get visualization request from queue
+                viz_request = self.viz_queue.get(block=True, timeout=0.1)
 
-        # Wait a bit longer for the scene to be fully loaded
-        rospy.sleep(1.0)
+                # Process the visualization request
+                pose, successful, show_tf = viz_request
+                self._do_visualize_pose(pose, successful, show_tf)
 
-        # Get all collision objects from the scene
-        scene_objects = self.env.scene.get_objects()
+                # Mark task as done
+                self.viz_queue.task_done()
 
-        # First log all available objects in the scene for debugging
-        rospy.loginfo("Planning scene objects:")
-        for obj_name in scene_objects:
-            rospy.loginfo(f"  - {obj_name}")
+                # Rate limit visualizations
+                self.viz_update_rate.sleep()
 
-        # Check if robot_roi exists in the scene
-        if "robot_roi" not in scene_objects:
-            rospy.logerr("robot_roi not found in planning scene objects")
-            return None
+            except queue.Empty:
+                # If queue is empty, just continue
+                pass
+            except Exception as e:
+                rospy.logerr(f"Error in visualization worker: {e}")
 
-        roi_object = scene_objects["robot_roi"]
-
-        # Extract information from the collision object
-        if (
-            not roi_object.primitives
-            or roi_object.primitives[0].type != SolidPrimitive.BOX
-        ):
-            rospy.logerr("robot_roi is not a box primitive")
-            return None
-
-        # Get dimensions from primitive
-        dimensions = list(roi_object.primitives[0].dimensions)
-
-        # Get pose from primitive
-        position = ros_numpy.geometry.point_to_numpy(roi_object.pose.position)
-        orientation = ros_numpy.geometry.quat_to_numpy(roi_object.pose.orientation)
-
-        # Create ROI info dict
-        roi_info = {
-            "type": "box",
-            "dimensions": dimensions,
-            "pose": {
-                "position": position,
-                "orientation": orientation,
-            },
-        }
-
-        rospy.loginfo(f"Found robot_roi with dimensions: {dimensions}")
-        rospy.loginfo(f"robot_roi position: {position}")
-        rospy.loginfo(f"robot_roi orientation: {orientation}")
-
-        # Additional debugging: Calculate the actual 3D bounds of the ROI
-        half_x, half_y, half_z = [d / 2 for d in dimensions]
-        x, y, z = position
-
-        x_min, x_max = x - half_x, x + half_x
-        y_min, y_max = y - half_y, y + half_y
-        z_min, z_max = z - half_z, z + half_z
-
-        rospy.loginfo(
-            f"ROI bounds: X: [{x_min:.3f}, {x_max:.3f}], Y: [{y_min:.3f}, {y_max:.3f}], Z: [{z_min:.3f}, {z_max:.3f}]"
-        )
-        return roi_info
+        rospy.loginfo("Visualization worker finished")
 
     def visualize_pose(self, pose, successful=None, show_tf=False):
-        """Visualize a pose using rviz_tools.
+        """Queue pose for visualization in a non-blocking way"""
+        if self.high_performance_mode:
+            # In high performance mode, only queue critical visualizations
+            # (executing poses or results) to minimize overhead
+            if not (show_tf or successful is not None):
+                return
 
-        Args:
-            pose: The pose to visualize
-            successful: Whether the pose was successfully reached (None if not yet determined)
-            show_tf: Whether to publish TF frames (only for executing poses)
-        """
+        try:
+            # Add to visualization queue instead of visualizing immediately
+            self.viz_queue.put((pose, successful, show_tf), block=False)
+        except queue.Full:
+            # If visualization queue is full, just skip this update
+            pass
+
+    def _do_visualize_pose(self, pose, successful=None, show_tf=False):
+        """Actually perform the visualization (called by visualization worker)"""
         with self.viz_lock:
             # Create an axis marker at the pose
             axis_length = 0.1
@@ -218,9 +208,76 @@ class PoseSampler:
                 # Send the transforms using the class member broadcaster
                 self.tf_broadcaster.sendTransform(transforms)
 
-            # Also visualize the end-effector pose with a different color
-            eef_pose = self.env.get_end_effector_transform(pose)
-            self.markers.publishAxis(eef_pose, axis_length * 0.8, axis_radius, lifetime)
+            # Also visualize the end-effector pose with a different color (but only if we're showing TF)
+            if show_tf:
+                eef_pose = self.env.get_end_effector_transform(pose)
+                self.markers.publishAxis(
+                    eef_pose, axis_length * 0.8, axis_radius, lifetime
+                )
+
+    def _get_roi_info(self):
+        """Extract information about the robot_roi region directly from the planning scene"""
+        rospy.loginfo("Retrieving robot_roi information from planning scene...")
+
+        # Wait a bit longer for the scene to be fully loaded
+        rospy.sleep(1.0)
+
+        # Get all collision objects from the scene
+        scene_objects = self.env.scene.get_objects()
+
+        # First log all available objects in the scene for debugging
+        rospy.loginfo("Planning scene objects:")
+        for obj_name in scene_objects:
+            rospy.loginfo(f"  - {obj_name}")
+
+        # Check if robot_roi exists in the scene
+        if "robot_roi" not in scene_objects:
+            rospy.logerr("robot_roi not found in planning scene objects")
+            return None
+
+        roi_object = scene_objects["robot_roi"]
+
+        # Extract information from the collision object
+        if (
+            not roi_object.primitives
+            or roi_object.primitives[0].type != SolidPrimitive.BOX
+        ):
+            rospy.logerr("robot_roi is not a box primitive")
+            return None
+
+        # Get dimensions from primitive
+        dimensions = list(roi_object.primitives[0].dimensions)
+
+        # Get pose from primitive
+        position = ros_numpy.geometry.point_to_numpy(roi_object.pose.position)
+        orientation = ros_numpy.geometry.quat_to_numpy(roi_object.pose.orientation)
+
+        # Create ROI info dict
+        roi_info = {
+            "type": "box",
+            "dimensions": dimensions,
+            "pose": {
+                "position": position,
+                "orientation": orientation,
+            },
+        }
+
+        rospy.loginfo(f"Found robot_roi with dimensions: {dimensions}")
+        rospy.loginfo(f"robot_roi position: {position}")
+        rospy.loginfo(f"robot_roi orientation: {orientation}")
+
+        # Additional debugging: Calculate the actual 3D bounds of the ROI
+        half_x, half_y, half_z = [d / 2 for d in dimensions]
+        x, y, z = position
+
+        x_min, x_max = x - half_x, x + half_x
+        y_min, y_max = y - half_y, y + half_y
+        z_min, z_max = z - half_z, z + half_z
+
+        rospy.loginfo(
+            f"ROI bounds: X: [{x_min:.3f}, {x_max:.3f}], Y: [{y_min:.3f}, {y_max:.3f}], Z: [{z_min:.3f}, {z_max:.3f}]"
+        )
+        return roi_info
 
     def sample_pose_within_roi(self, max_angle=math.pi / 6):
         """
@@ -450,10 +507,19 @@ class PoseSampler:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
+                # Setup early to avoid unbound local variable error
+                executor = None
+
                 try:
-                    # Start execution
-                    execution_future = loop.run_until_complete(
-                        self.env.executor.execute_plan_async(plan)
+                    # Use concurrent.futures ThreadPoolExecutor instead of asyncio.ThreadPoolExecutor
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    executor = ThreadPoolExecutor(max_workers=1)
+
+                    # Start execution directly with the threadsafe method
+                    execution_future = loop.run_in_executor(
+                        executor,
+                        lambda: self.env.executor._execute_plan_threadsafe(plan),
                     )
 
                     # Wait for completion with timeout
@@ -472,12 +538,12 @@ class PoseSampler:
                         self.successful_poses.append(pose)
                         self.visualize_pose(pose, successful=True, show_tf=True)
 
-                        # Pause briefly at the successful pose
-                        rospy.sleep(0.5)
+                        # Shorter pause at the successful pose for better throughput
+                        rospy.sleep(0.2)
 
-                        # Move back to home asynchronously
-                        home_future = loop.run_until_complete(
-                            self.env.executor.move_to_home_async(self.env.planner)
+                        # Move back to home asynchronously using direct thread executor for better performance
+                        home_future = loop.run_in_executor(
+                            executor, self.env.executor._move_to_home_threadsafe
                         )
 
                         # Wait for home completion with timeout
@@ -497,6 +563,9 @@ class PoseSampler:
                     self.visualize_pose(pose, successful=False, show_tf=False)
 
                 finally:
+                    # Only shutdown the executor if it was created successfully
+                    if executor:
+                        executor.shutdown(wait=False)
                     loop.close()
 
                 # Mark execution task as done
@@ -525,6 +594,7 @@ class PoseSampler:
             f"Using max deviation angle: {max_angle} radians ({math.degrees(max_angle):.1f} degrees)"
         )
         rospy.loginfo(f"Using parallel processing with queues")
+        rospy.loginfo(f"High performance mode enabled: {self.high_performance_mode}")
 
         # Reset counters
         self.attempt_count = 0
@@ -544,10 +614,13 @@ class PoseSampler:
         sampler_thread.start()
         threads.append(sampler_thread)
 
-        # Start planner worker
-        planner_thread = threading.Thread(target=self.planner_worker, daemon=True)
-        planner_thread.start()
-        threads.append(planner_thread)
+        # Start planner worker - use multiple planner threads for better utilization
+        num_planner_threads = 4  # Fixed number of planner threads
+        rospy.loginfo(f"Starting {num_planner_threads} planner threads")
+        for i in range(num_planner_threads):
+            planner_thread = threading.Thread(target=self.planner_worker, daemon=True)
+            planner_thread.start()
+            threads.append(planner_thread)
 
         # Start executor worker
         executor_thread = threading.Thread(
