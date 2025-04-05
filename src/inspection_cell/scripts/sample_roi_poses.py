@@ -11,12 +11,12 @@ from tf.transformations import (
 import traceback
 import argparse
 from inspection_cell.load_system import EnvironmentLoader
-from geometry_msgs.msg import Pose, Point, Quaternion, Vector3
+from geometry_msgs.msg import Pose, Point, Quaternion, Vector3, TransformStamped
 from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.msg import PlanningScene
 import rviz_tools_py as viz
 import tf2_ros
-import geometry_msgs.msg
+import ros_numpy
 
 
 class PoseSampler:
@@ -82,48 +82,26 @@ class PoseSampler:
         dimensions = list(roi_object.primitives[0].dimensions)
 
         # Get pose from primitive
-        position = roi_object.primitive_poses[0].position
-        orientation = roi_object.primitive_poses[0].orientation
-
-        # Convert position to list for easier handling
-        position_list = [position.x, position.y, position.z]
-
-        # Check if position is at origin (likely incorrect)
-        if position_list == [0.0, 0.0, 0.0]:
-            rospy.logwarn(
-                "Warning: robot_roi position is at [0,0,0], which might be incorrect"
-            )
-            rospy.loginfo(
-                "Attempting to get position from environment configuration..."
-            )
-
-            # Try to get position from environment configuration
-            if "robot_roi" in self.env.config:
-                config_position = self.env.config["robot_roi"]["pose"]["position"]
-                rospy.loginfo(
-                    f"Found robot_roi in config with position: {config_position}"
-                )
-
-                # Use the position from the config instead
-                position_list = config_position
-                rospy.loginfo(f"Using position from config: {position_list}")
+        position = ros_numpy.geometry.point_to_numpy(roi_object.pose.position)
+        orientation = ros_numpy.geometry.quat_to_numpy(roi_object.pose.orientation)
 
         # Create ROI info dict
         roi_info = {
             "type": "box",
             "dimensions": dimensions,
             "pose": {
-                "position": position_list,
-                "orientation": [0, 0, 0],  # We assume 0 rotation for simplicity
+                "position": position,
+                "orientation": orientation,
             },
         }
 
         rospy.loginfo(f"Found robot_roi with dimensions: {dimensions}")
-        rospy.loginfo(f"robot_roi position: {position_list}")
+        rospy.loginfo(f"robot_roi position: {position}")
+        rospy.loginfo(f"robot_roi orientation: {orientation}")
 
         # Additional debugging: Calculate the actual 3D bounds of the ROI
         half_x, half_y, half_z = [d / 2 for d in dimensions]
-        x, y, z = position_list
+        x, y, z = position
 
         x_min, x_max = x - half_x, x + half_x
         y_min, y_max = y - half_y, y + half_y
@@ -160,7 +138,7 @@ class PoseSampler:
         transforms = []
 
         # Create transform for TCP pose
-        tcp_transform = geometry_msgs.msg.TransformStamped()
+        tcp_transform = TransformStamped()
         tcp_transform.header.stamp = rospy.Time.now()
         tcp_transform.header.frame_id = "world"
         tcp_transform.child_frame_id = "sampled_pose"
@@ -176,7 +154,7 @@ class PoseSampler:
         eef_pose = self.env.get_end_effector_transform(pose)
 
         # Create transform for end-effector pose
-        eef_transform = geometry_msgs.msg.TransformStamped()
+        eef_transform = TransformStamped()
         eef_transform.header.stamp = rospy.Time.now()
         eef_transform.header.frame_id = "world"
         eef_transform.child_frame_id = "eef_pose"

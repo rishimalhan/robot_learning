@@ -271,10 +271,10 @@ Visualization Manager:
         {}
       Queue Size: 100
       Value: false
-    - Class: rviz/MarkerArray
+    - Class: rviz/Marker
       Enabled: true
-      Marker Topic: viz
-      Name: MarkerArray
+      Marker Topic: /viz
+      Name: Marker
       Namespaces:
         {}
       Queue Size: 100

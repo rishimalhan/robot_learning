@@ -263,13 +263,6 @@ class EnvironmentLoader:
         # Resolve mesh path
         mesh_path = resolve_package_path(tool_config["mesh_path"])
 
-        # Get objects that should have collision disabled with tool
-        environment_config = get_param("/environment")
-        collision_disabled_objects = []
-        for obj_name, obj_config in environment_config.items():
-            if not obj_config.get("collision_enabled", True):
-                collision_disabled_objects.append(obj_name)
-
         # IMPORTANT: First attach the mesh tool TELLING IT TO IGNORE collisions with specific objects
         self.scene.attach_mesh(
             eef_link,
@@ -364,11 +357,16 @@ class EnvironmentLoader:
         try:
             # Get current ACM
             current_acm = self._get_current_acm()
+            existing_entry_indices = [
+                current_acm.entry_names.index(name) for name in current_acm.entry_names
+            ]
             if not current_acm:
                 rospy.logwarn("No ACM retrieved, skipping ACM update")
                 return
-            objects = self.scene.get_objects()
-            objects.update(self.scene.get_attached_objects())
+            objects = {
+                **self.scene.get_objects(),
+                **self.scene.get_attached_objects(),
+            }
             environment_config = get_param("/environment")
 
             # Track objects that should have collision disabled
@@ -386,63 +384,62 @@ class EnvironmentLoader:
 
             # First ensure all objects are in the ACM
             added_objects = []
-            existing_entry_indices = []
             for object_id in objects:
                 # Skip if already in ACM
                 if object_id in current_acm.entry_names:
-                    existing_entry_indices.append(
-                        current_acm.entry_names.index(object_id)
-                    )
                     continue
-                # Add object to entry names
-                current_acm.entry_names.append(object_id)
                 added_objects.append(object_id)
 
-            # Extend existing entries with default values for new objects
-            for i in range(len(current_acm.entry_values)):
-                if len(added_objects) > 0:
-                    current_acm.entry_values[i].enabled.extend(
+            if len(added_objects) > 0:
+                # Extend existing entries with default values for new objects
+                for index in existing_entry_indices:
+                    current_acm.entry_values[index].enabled.extend(
                         [False] * len(added_objects)
                     )
                     rospy.loginfo(
-                        f"Extended entry at index {i} for object {current_acm.entry_names[i]} to handle {len(added_objects)} new objects"
+                        f"Extended entry at index {index} for object {current_acm.entry_names[index]} to handle {len(added_objects)} new objects"
                     )
+                # Add object to entry names
+                current_acm.entry_names.extend(added_objects)
 
-            # Create new entries for added objects
-            for i, object_id in enumerate(added_objects):
-                entry = AllowedCollisionEntry()
-                entry.enabled = [False] * len(current_acm.entry_names)
-                current_acm.entry_values.append(entry)
-                # Log the new entry with proper index
-                new_idx = len(current_acm.entry_names) - len(added_objects) + i
-                rospy.loginfo(
-                    f"Added new entry for {object_id} at index {new_idx} with {len(entry.enabled)} values"
-                )
-
-            # Apply the updated ACM with new objects
-            self._apply_acm(current_acm)
+                # Create new entries for added objects
+                for index, object_id in enumerate(added_objects):
+                    entry = AllowedCollisionEntry()
+                    entry.enabled = [False] * len(current_acm.entry_names)
+                    current_acm.entry_values.append(entry)
+                    rospy.loginfo(
+                        f"Added new entry for {object_id} at index {index+len(existing_entry_indices)} with {len(entry.enabled)} values"
+                    )
 
             # Now disable collisions for objects that need it
             for obj_name in collision_disabled_objects:
                 # Disable self-collision for this object
-                self._disable_collision_between(obj_name, obj_name)
+                acm = self._disable_collision_between(obj_name, obj_name, current_acm)
 
                 # Disable collision with everything else in scene
                 for other_obj_name in objects.keys():
                     if other_obj_name != obj_name:
-                        self._disable_collision_between(obj_name, other_obj_name)
+                        acm = self._disable_collision_between(
+                            obj_name, other_obj_name, current_acm
+                        )
+
+            # Apply the updated ACM with new objects
+            self._apply_acm(acm)
 
         except Exception as e:
             rospy.logerr(f"Error updating ACM: {e}")
 
-    def _disable_collision_between(self, name1, name2):
-        """Explicitly disable collision between two named objects."""
-        try:
-            # Get current ACM
-            current_acm = self._get_current_acm()
-            if not current_acm:
-                return False
+    def _disable_collision_between(self, name1, name2, current_acm):
+        """
+        Explicitly disable collision between two named objects.
 
+        Args:
+            name1: The name of the first object
+            name2: The name of the second object
+            current_acm: The current Allowed Collision Matrix
+        """
+
+        try:
             # Check if both objects are in the ACM
             if (
                 name1 not in current_acm.entry_names
@@ -460,10 +457,11 @@ class EnvironmentLoader:
                 current_acm.entry_values[idx2].enabled[idx1] = True
 
             # Apply the change
-            return self._apply_acm(current_acm)
+            return current_acm
         except Exception as e:
-            rospy.logerr(f"Error disabling collision between {name1} and {name2}: {e}")
-            return False
+            raise Exception(
+                f"Error disabling collision between {name1} and {name2}: {e}"
+            )
 
     def _get_current_acm(self):
         """Get the current Allowed Collision Matrix."""
