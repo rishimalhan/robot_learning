@@ -456,7 +456,7 @@ def main():
             help="Number of successful poses to find",
         )
         parser.add_argument(
-            "--max-attempts", type=int, default=10, help="Maximum sampling attempts"
+            "--max-attempts", type=int, default=100, help="Maximum sampling attempts"
         )
         parser.add_argument(
             "--max-angle",
