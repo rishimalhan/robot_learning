@@ -2,6 +2,9 @@
 
 import rospy
 import time
+import threading
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from moveit_commander import MoveGroupCommander, RobotCommander
 from inspection_cell.collision_checker import CollisionCheck
 from moveit_msgs.msg import RobotTrajectory
@@ -25,6 +28,8 @@ class Executor:
         self.robot = RobotCommander()
         self.move_group = MoveGroupCommander(move_group_name)
         self.group_name = move_group_name
+        self._thread_executor = ThreadPoolExecutor(max_workers=1)
+        self._execution_lock = threading.Lock()
         rospy.loginfo(f"Executor initialized for group: {move_group_name}")
 
     def execute_plan(self, plan, wait=True):
@@ -72,6 +77,68 @@ class Executor:
             rospy.logerr(f"Execution failed with error: {str(e)}")
             return False
 
+    async def execute_plan_async(self, plan):
+        """
+        Execute a motion plan asynchronously using asyncio.
+
+        Args:
+            plan: Motion plan to execute
+
+        Returns:
+            asyncio.Future: Future that resolves to execution success (bool)
+        """
+        if not plan or not plan.joint_trajectory.points:
+            rospy.logerr("Cannot execute empty plan")
+            return False
+
+        rospy.loginfo(
+            f"Executing trajectory asynchronously with {len(plan.joint_trajectory.points)} waypoints"
+        )
+
+        loop = asyncio.get_event_loop()
+
+        # Use ThreadPoolExecutor to run the execution in a separate thread
+        # This prevents blocking the asyncio event loop
+        future = loop.run_in_executor(
+            self._thread_executor, self._execute_plan_threadsafe, plan
+        )
+
+        return future
+
+    def _execute_plan_threadsafe(self, plan):
+        """
+        Thread-safe execution of a plan, to be called from a ThreadPoolExecutor.
+
+        Args:
+            plan: Motion plan to execute
+
+        Returns:
+            bool: True if execution succeeded, False otherwise
+        """
+        with self._execution_lock:
+            start_time = time.time()
+            try:
+                # Execute with wait=True to ensure the thread doesn't return until execution is complete
+                execution_success = self.move_group.execute(plan, wait=True)
+                execution_time = time.time() - start_time
+
+                if execution_success:
+                    rospy.loginfo(
+                        f"Async execution completed successfully in {execution_time:.2f} seconds"
+                    )
+                else:
+                    rospy.logerr(
+                        f"Async execution failed after {execution_time:.2f} seconds"
+                    )
+
+                return execution_success
+            except Exception as e:
+                execution_time = time.time() - start_time
+                rospy.logerr(
+                    f"Async execution failed with error after {execution_time:.2f} seconds: {str(e)}"
+                )
+                return False
+
     def move_to_home(self, planner=None):
         """
         Move the robot to the home position.
@@ -118,7 +185,75 @@ class Executor:
                     self.move_group.set_named_target("home")
                     rospy.loginfo("Planning and moving to 'home' target")
                 else:
-                    # If no "home" target available, use the default home position
+                    # If no "home" target found, use the default home position
+                    rospy.loginfo("No 'home' target found, using robot-specific home")
+                    self.move_group.set_named_target("home")
+
+                # Plan and execute in one go
+                success = self.move_group.go(wait=True)
+
+                # Report results
+                if success:
+                    rospy.loginfo("Successfully moved to home position")
+                else:
+                    rospy.logwarn("Failed to move to home position")
+
+                return success
+
+            except Exception as e:
+                rospy.logerr(f"Error moving to home: {str(e)}")
+                return False
+
+    async def move_to_home_async(self, planner=None):
+        """
+        Move the robot to the home position asynchronously.
+
+        Args:
+            planner: An optional Planner instance to use for planning.
+                   If None, uses the move_group directly.
+
+        Returns:
+            asyncio.Future: Future that resolves to execution success (bool)
+        """
+        rospy.loginfo("Moving to home position asynchronously...")
+
+        # Get available named targets
+        named_targets = self.move_group.get_named_targets()
+
+        # Check if we're using an external planner
+        if planner:
+            # Use the provided planner
+            if "home" in named_targets:
+                # Plan to the named target
+                success, plan, planning_time, error_code = planner.plan_to_named_target(
+                    "home"
+                )
+            else:
+                # Plan to home
+                success, plan, planning_time, error_code = planner.plan_to_home()
+
+            if not success or not plan:
+                rospy.logwarn("Failed to plan to home position")
+                return False
+
+            # Execute the plan asynchronously
+            return await self.execute_plan_async(plan)
+        else:
+            # For direct move_group planning, we still need to make it async
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self._thread_executor, self._move_to_home_threadsafe
+            )
+
+    def _move_to_home_threadsafe(self):
+        """Thread-safe implementation of moving to home position."""
+        with self._execution_lock:
+            try:
+                named_targets = self.move_group.get_named_targets()
+                if "home" in named_targets:
+                    self.move_group.set_named_target("home")
+                    rospy.loginfo("Planning and moving to 'home' target")
+                else:
                     rospy.loginfo("No 'home' target found, using robot-specific home")
                     self.move_group.set_named_target("home")
 
@@ -164,19 +299,37 @@ class Executor:
 if __name__ == "__main__":
     # Simple test if this file is run directly
     from inspection_cell.planner import Planner
+    import asyncio
+
+    async def test_async_execution():
+        planner = Planner()
+        executor = Executor()
+
+        # Test the async move_to_home functionality
+        rospy.loginfo("Testing move_to_home_async with planner...")
+        success = await executor.move_to_home_async(planner)
+
+        if success:
+            rospy.loginfo("Async move to home succeeded!")
+        else:
+            rospy.logerr("Async move to home failed!")
 
     rospy.init_node("executor_test", anonymous=True)
 
+    # Run the async test
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(test_async_execution())
+
+    # Normal sync test for comparison
     planner = Planner()
     executor = Executor()
 
-    # Test the move_to_home functionality
-    rospy.loginfo("Testing move_to_home with planner...")
+    rospy.loginfo("Testing synchronous move_to_home with planner...")
     success = executor.move_to_home(planner)
 
     if success:
-        rospy.loginfo("Move to home succeeded!")
+        rospy.loginfo("Synchronous move to home succeeded!")
     else:
-        rospy.logerr("Move to home failed!")
+        rospy.logerr("Synchronous move to home failed!")
 
     rospy.spin()

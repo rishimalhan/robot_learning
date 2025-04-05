@@ -3,6 +3,10 @@
 import rospy
 import random
 import math
+import threading
+import queue
+import asyncio
+from collections import deque
 from tf.transformations import (
     quaternion_from_euler,
     quaternion_multiply,
@@ -18,6 +22,7 @@ import rviz_tools_py as viz
 import tf2_ros
 import ros_numpy
 import numpy as np
+import time
 
 
 class PoseSampler:
@@ -28,6 +33,26 @@ class PoseSampler:
         # Track sampled and successful poses
         self.sampled_poses = []
         self.successful_poses = []
+
+        # Setup queues for parallelism
+        self.planning_queue = queue.Queue(maxsize=10)  # Queue of poses to plan
+        self.execution_queue = queue.Queue(maxsize=10)  # Queue of plans to execute
+
+        # Lock for visualization
+        self.viz_lock = threading.Lock()
+
+        # Event to signal shutdown
+        self.shutdown_event = threading.Event()
+
+        # Counters with locks
+        self.attempt_count_lock = threading.Lock()
+        self.attempt_count = 0
+        self.success_count_lock = threading.Lock()
+        self.success_count = 0
+
+        # Flag for TF visualization - only show for executing poses
+        self.show_tf = False
+        self.current_executing_pose = None
 
         # Initialize the environment loader
         rospy.loginfo("Loading environment...")
@@ -113,81 +138,89 @@ class PoseSampler:
         )
         return roi_info
 
-    def visualize_pose(self, pose, successful=None):
+    def visualize_pose(self, pose, successful=None, show_tf=False):
         """Visualize a pose using rviz_tools.
 
         Args:
             pose: The pose to visualize
             successful: Whether the pose was successfully reached (None if not yet determined)
+            show_tf: Whether to publish TF frames (only for executing poses)
         """
-        # Create an axis marker at the pose
-        axis_length = 0.1
-        axis_radius = 0.01
-        lifetime = 0  # 0 = forever
+        with self.viz_lock:
+            # Create an axis marker at the pose
+            axis_length = 0.1
+            axis_radius = 0.01
+            lifetime = 0  # 0 = forever
 
-        # Visualize the pose with an axis marker
-        self.markers.publishAxis(pose, axis_length, axis_radius, lifetime)
+            # Visualize the pose with an axis marker
+            self.markers.publishAxis(pose, axis_length, axis_radius, lifetime)
 
-        # Add a sphere to indicate success/failure status if provided
-        if successful is not None:
-            # Use a sphere to indicate success/failure
-            diameter = 0.025
-            color = "green" if successful else "red"
-            self.markers.publishSphere(pose, color, diameter, lifetime)
+            # Add a sphere to indicate success/failure status if provided
+            if successful is not None:
+                # Use a sphere to indicate success/failure
+                diameter = 0.025
+                color = "green" if successful else "red"
+                self.markers.publishSphere(pose, color, diameter, lifetime)
 
-        # Publish TF frames for the pose and end-effector pose
-        transforms = []
+            # Publish TF frames only if requested (for executing poses)
+            if show_tf:
+                transforms = []
 
-        # Create transform for TCP pose (world to TCP)
-        tcp_transform = TransformStamped()
-        tcp_transform.header.stamp = rospy.Time.now()
-        tcp_transform.header.frame_id = "world"
-        tcp_transform.child_frame_id = "sampled_pose"
+                # Create transform for TCP pose
+                tcp_transform = TransformStamped()
+                tcp_transform.header.stamp = rospy.Time.now()
+                tcp_transform.header.frame_id = "world"
+                tcp_transform.child_frame_id = (
+                    "sampled_pose"  # Use fixed name to replace previous
+                )
 
-        # Set translation and rotation from the input pose
-        tcp_transform.transform.translation.x = pose.position.x
-        tcp_transform.transform.translation.y = pose.position.y
-        tcp_transform.transform.translation.z = pose.position.z
-        tcp_transform.transform.rotation = pose.orientation
-        transforms.append(tcp_transform)
+                # Set translation and rotation from the input pose
+                tcp_transform.transform.translation.x = pose.position.x
+                tcp_transform.transform.translation.y = pose.position.y
+                tcp_transform.transform.translation.z = pose.position.z
+                tcp_transform.transform.rotation = pose.orientation
+                transforms.append(tcp_transform)
 
-        # Get end-effector pose
-        eef_pose = self.env.get_end_effector_transform(pose)
+                # Get end-effector pose
+                eef_pose = self.env.get_end_effector_transform(pose)
 
-        # Create direct transform from TCP to end-effector
-        tcp_to_eef = TransformStamped()
-        tcp_to_eef.header.stamp = rospy.Time.now()
-        tcp_to_eef.header.frame_id = "sampled_pose"
-        tcp_to_eef.child_frame_id = "eef_pose"
+                # Create direct transform from TCP to end-effector
+                tcp_to_eef = TransformStamped()
+                tcp_to_eef.header.stamp = rospy.Time.now()
+                tcp_to_eef.header.frame_id = "sampled_pose"
+                tcp_to_eef.child_frame_id = (
+                    "eef_pose"  # Use fixed name to replace previous
+                )
 
-        # Calculate the relative transform from TCP to end-effector
-        # Get TCP and end-effector poses as numpy matrices
-        tcp_matrix = ros_numpy.numpify(pose)
-        eef_matrix = ros_numpy.numpify(eef_pose)
+                # Calculate the relative transform from TCP to end-effector
+                # Get TCP and end-effector poses as numpy matrices
+                tcp_matrix = ros_numpy.numpify(pose)
+                eef_matrix = ros_numpy.numpify(eef_pose)
 
-        # Calculate relative transform: tcp_T_eef = inv(tcp_T_world) * eef_T_world
-        relative_transform = np.matmul(np.linalg.inv(tcp_matrix), eef_matrix)
+                # Calculate relative transform: tcp_T_eef = inv(tcp_T_world) * eef_T_world
+                relative_transform = np.matmul(np.linalg.inv(tcp_matrix), eef_matrix)
 
-        # Extract translation and rotation from the relative transform
-        translation = relative_transform[:3, 3]
-        rotation = quaternion_from_matrix(relative_transform)
+                # Extract translation and rotation from the relative transform
+                translation = relative_transform[:3, 3]
+                rotation = quaternion_from_matrix(relative_transform)
 
-        # Set the transform values
-        tcp_to_eef.transform.translation.x = translation[0]
-        tcp_to_eef.transform.translation.y = translation[1]
-        tcp_to_eef.transform.translation.z = translation[2]
-        tcp_to_eef.transform.rotation.x = rotation[0]
-        tcp_to_eef.transform.rotation.y = rotation[1]
-        tcp_to_eef.transform.rotation.z = rotation[2]
-        tcp_to_eef.transform.rotation.w = rotation[3]
+                # Set the transform values
+                tcp_to_eef.transform.translation.x = translation[0]
+                tcp_to_eef.transform.translation.y = translation[1]
+                tcp_to_eef.transform.translation.z = translation[2]
+                tcp_to_eef.transform.rotation.x = rotation[0]
+                tcp_to_eef.transform.rotation.y = rotation[1]
+                tcp_to_eef.transform.rotation.z = rotation[2]
+                tcp_to_eef.transform.rotation.w = rotation[3]
 
-        transforms.append(tcp_to_eef)
+                transforms.append(tcp_to_eef)
 
-        # Send the transforms using the class member broadcaster
-        self.tf_broadcaster.sendTransform(transforms)
+                # Send the transforms using the class member broadcaster
+                self.tf_broadcaster.sendTransform(transforms)
 
-        # Also visualize the end-effector pose with a different color
-        self.markers.publishAxis(eef_pose, axis_length * 0.8, axis_radius, lifetime)
+            # Also visualize the end-effector pose with a different color
+            eef_pose = self.env.get_end_effector_transform(pose)
+            self.markers.publishAxis(eef_pose, axis_length * 0.8, axis_radius, lifetime)
 
     def sample_pose_within_roi(self, max_angle=math.pi / 6):
         """
@@ -214,25 +247,10 @@ class PoseSampler:
         y_half_size = roi_dimensions[1] / 2.0
         z_half_size = roi_dimensions[2] / 2.0
 
-        # Log the sampling bounds for debugging
-        rospy.loginfo(f"Sampling within bounds:")
-        rospy.loginfo(
-            f"  X: {roi_position[0] - x_half_size:.3f} to {roi_position[0] + x_half_size:.3f}"
-        )
-        rospy.loginfo(
-            f"  Y: {roi_position[1] - y_half_size:.3f} to {roi_position[1] + y_half_size:.3f}"
-        )
-        rospy.loginfo(
-            f"  Z: {roi_position[2] - z_half_size:.3f} to {roi_position[2] + z_half_size:.3f}"
-        )
-
         # Sample random position strictly within the ROI bounds
         x = roi_position[0] + random.uniform(-x_half_size, x_half_size)
         y = roi_position[1] + random.uniform(-y_half_size, y_half_size)
         z = roi_position[2] + random.uniform(-z_half_size, z_half_size)
-
-        # Log the sampled position for debugging
-        rospy.loginfo(f"Sampled position: ({x:.3f}, {y:.3f}, {z:.3f})")
 
         # Verify the sampled position is within the ROI
         if (
@@ -323,48 +341,179 @@ class PoseSampler:
 
         return pose
 
-    def plan_and_execute_to_pose(self, pose):
-        """Plan and execute a motion to the given pose.
-        The input pose is in TCP frame, we need to convert it to planning frame for MoveIt.
-        """
+    def sampler_worker(self, max_attempts, max_angle):
+        """Worker thread that samples poses and adds them to the planning queue."""
+        attempt_count = 0
 
-        # Visualize the planning pose
-        self.visualize_pose(pose)
+        while attempt_count < max_attempts and not self.shutdown_event.is_set():
+            # Sample a random pose within the ROI
+            pose = self.sample_pose_within_roi(max_angle=max_angle)
+            if not pose:
+                continue
 
-        # Plan to the pose
-        success, plan, planning_time, error_code = self.env.planner.plan_to_pose_target(
-            self.env.get_end_effector_transform(pose)
-        )
+            # Update the attempt counter
+            with self.attempt_count_lock:
+                self.attempt_count += 1
+                attempt_count += 1
+                current_attempt = self.attempt_count
 
-        if success and plan:
-            rospy.loginfo(
-                f"Plan to pose successful, planning time: {planning_time:.2f} seconds"
-            )
-            rospy.sleep(0.5)
+            rospy.loginfo(f"Sampled pose {current_attempt}/{max_attempts}")
 
-            # Execute the plan
-            execution_success = self.env.executor.execute_plan(plan)
-            if execution_success:
-                rospy.loginfo("Successfully moved to pose")
-                # Update visualization to show success
-                self.visualize_pose(pose, successful=True)
-                return True
-            else:
-                rospy.logwarn("Failed to execute plan to pose")
-                # Update visualization to show failure
-                self.visualize_pose(pose, successful=False)
-                return False
-        else:
-            rospy.logwarn(f"Failed to plan to pose, error code: {error_code}")
-            # Update visualization to show failure
-            self.visualize_pose(pose, successful=False)
-            return False
+            # Store the sampled pose
+            self.sampled_poses.append(pose)
+
+            # Add the pose to the planning queue (without visualizing)
+            try:
+                self.planning_queue.put(
+                    (pose, current_attempt), block=True, timeout=1.0
+                )
+            except queue.Full:
+                # If the planning queue is full, wait and try again
+                rospy.loginfo("Planning queue full, waiting...")
+                rospy.sleep(0.5)
+                continue
+
+        rospy.loginfo("Sampler worker finished")
+
+    def planner_worker(self):
+        """Worker thread that plans paths for sampled poses."""
+        while not self.shutdown_event.is_set():
+            try:
+                # Get a pose from the queue
+                pose, attempt_number = self.planning_queue.get(block=True, timeout=1.0)
+
+                # Visualize the pose when we start planning for it (but don't show TF)
+                self.visualize_pose(pose, show_tf=False)
+
+                # Plan to the pose
+                start_time = time.time()
+                success, plan, planning_time, error_code = (
+                    self.env.planner.plan_to_pose_target(
+                        self.env.get_end_effector_transform(pose)
+                    )
+                )
+
+                if success and plan:
+                    total_time = time.time() - start_time
+                    rospy.loginfo(
+                        f"Plan for pose {attempt_number} successful, planning time: {planning_time:.2f}s, total: {total_time:.2f}s"
+                    )
+
+                    # Add plan to execution queue
+                    try:
+                        self.execution_queue.put(
+                            (pose, plan, attempt_number), block=True, timeout=1.0
+                        )
+                    except queue.Full:
+                        rospy.logwarn(
+                            f"Execution queue full, dropping plan for pose {attempt_number}"
+                        )
+                        self.visualize_pose(pose, successful=False, show_tf=False)
+                else:
+                    rospy.logwarn(
+                        f"Failed to plan for pose {attempt_number}, error code: {error_code}"
+                    )
+                    self.visualize_pose(pose, successful=False, show_tf=False)
+
+                # Mark planning task as done
+                self.planning_queue.task_done()
+
+            except queue.Empty:
+                # If there's nothing in the queue, sleep briefly
+                rospy.sleep(0.1)
+                continue
+
+        rospy.loginfo("Planner worker finished")
+
+    def executor_worker(self, target_success_count):
+        """Worker thread that executes planned paths."""
+        while not self.shutdown_event.is_set():
+            try:
+                # Check if we've reached our target success count
+                with self.success_count_lock:
+                    if self.success_count >= target_success_count:
+                        rospy.loginfo(
+                            f"Reached target of {target_success_count} successful poses, executor stopping"
+                        )
+                        break
+
+                # Get a plan from the queue
+                pose, plan, attempt_number = self.execution_queue.get(
+                    block=True, timeout=1.0
+                )
+
+                # Update the currently executing pose and show TF for it
+                self.visualize_pose(pose, show_tf=True)
+
+                # Execute the plan asynchronously
+                rospy.loginfo(f"Executing plan for pose {attempt_number}")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                try:
+                    # Start execution
+                    execution_future = loop.run_until_complete(
+                        self.env.executor.execute_plan_async(plan)
+                    )
+
+                    # Wait for completion with timeout
+                    execution_success = loop.run_until_complete(
+                        asyncio.wait_for(execution_future, timeout=30.0)
+                    )
+
+                    if execution_success:
+                        with self.success_count_lock:
+                            self.success_count += 1
+                            current_success = self.success_count
+
+                        rospy.loginfo(
+                            f"Successfully moved to pose {attempt_number}, success {current_success}/{target_success_count}"
+                        )
+                        self.successful_poses.append(pose)
+                        self.visualize_pose(pose, successful=True, show_tf=True)
+
+                        # Pause briefly at the successful pose
+                        rospy.sleep(0.5)
+
+                        # Move back to home asynchronously
+                        home_future = loop.run_until_complete(
+                            self.env.executor.move_to_home_async(self.env.planner)
+                        )
+
+                        # Wait for home completion with timeout
+                        loop.run_until_complete(
+                            asyncio.wait_for(home_future, timeout=30.0)
+                        )
+                    else:
+                        rospy.logwarn(
+                            f"Failed to execute plan for pose {attempt_number}"
+                        )
+                        self.visualize_pose(pose, successful=False, show_tf=False)
+
+                except (asyncio.TimeoutError, Exception) as e:
+                    rospy.logwarn(
+                        f"Error executing plan for pose {attempt_number}: {e}"
+                    )
+                    self.visualize_pose(pose, successful=False, show_tf=False)
+
+                finally:
+                    loop.close()
+
+                # Mark execution task as done
+                self.execution_queue.task_done()
+
+            except queue.Empty:
+                # If there's nothing in the queue, sleep briefly
+                rospy.sleep(0.1)
+                continue
+
+        rospy.loginfo("Executor worker finished")
 
     def sample_and_test_poses(
         self, num_poses=10, max_attempts=50, max_angle=math.pi / 6
     ):
         """
-        Sample poses and test if the robot can move to them
+        Sample poses and test if the robot can move to them in parallel.
 
         Args:
             num_poses: Number of successful poses to collect
@@ -375,70 +524,91 @@ class PoseSampler:
         rospy.loginfo(
             f"Using max deviation angle: {max_angle} radians ({math.degrees(max_angle):.1f} degrees)"
         )
+        rospy.loginfo(f"Using parallel processing with queues")
+
+        # Reset counters
+        self.attempt_count = 0
+        self.success_count = 0
 
         # First move to home position
+        rospy.loginfo("Moving to home position before starting parallel workers")
         self.env.executor.move_to_home(self.env.planner)
 
-        successful_count = 0
-        attempt_count = 0
+        # Create and start worker threads
+        threads = []
 
-        while successful_count < num_poses and attempt_count < max_attempts:
-            attempt_count += 1
+        # Start sampler worker
+        sampler_thread = threading.Thread(
+            target=self.sampler_worker, args=(max_attempts, max_angle), daemon=True
+        )
+        sampler_thread.start()
+        threads.append(sampler_thread)
 
-            rospy.loginfo(f"Attempt {attempt_count}")
+        # Start planner worker
+        planner_thread = threading.Thread(target=self.planner_worker, daemon=True)
+        planner_thread.start()
+        threads.append(planner_thread)
 
-            # Sample a random pose within the ROI
-            pose = self.sample_pose_within_roi(max_angle=max_angle)
-            if not pose:
-                continue
+        # Start executor worker
+        executor_thread = threading.Thread(
+            target=self.executor_worker, args=(num_poses,), daemon=True
+        )
+        executor_thread.start()
+        threads.append(executor_thread)
 
-            # Store the sampled pose
-            self.sampled_poses.append(pose)
+        # Wait for all threads to complete or for Ctrl+C
+        try:
+            # Wait for the executor thread to finish (indicates we've reached our target)
+            executor_thread.join()
 
-            # Try to plan and execute a motion to the pose
-            success = self.plan_and_execute_to_pose(pose)
+            # Signal other threads to stop
+            self.shutdown_event.set()
 
-            if success:
-                successful_count += 1
-                self.successful_poses.append(pose)
-                rospy.loginfo(f"Pose {successful_count}/{num_poses} was successful")
-                # Pause at the successful pose so the user can see it
-                rospy.sleep(1.0)
-                self.env.executor.move_to_home(self.env.planner)
-            else:
-                rospy.loginfo(f"Pose attempt {attempt_count}/{max_attempts} failed")
-                continue
+            # Wait for remaining threads with timeout
+            for thread in threads:
+                thread.join(timeout=2.0)
 
-        # Report results
-        if successful_count >= num_poses:
-            rospy.loginfo(
-                f"Successfully found and executed {successful_count} poses in {attempt_count} attempts"
-            )
-        else:
-            rospy.logwarn(
-                f"Only found {successful_count}/{num_poses} successful poses after {attempt_count} attempts"
-            )
+            # Report results
+            with self.success_count_lock, self.attempt_count_lock:
+                if self.success_count >= num_poses:
+                    rospy.loginfo(
+                        f"Successfully found and executed {self.success_count} poses in {self.attempt_count} attempts"
+                    )
+                else:
+                    rospy.logwarn(
+                        f"Only found {self.success_count}/{num_poses} successful poses after {self.attempt_count} attempts"
+                    )
 
-        # Display all successful poses with a different visualization
-        rospy.loginfo(f"Displaying {len(self.successful_poses)} successful poses")
-        for i, pose in enumerate(self.successful_poses):
-            # Create pose text label
-            text_pose = Pose(
-                Point(pose.position.x, pose.position.y, pose.position.z + 0.1),
-                Quaternion(0, 0, 0, 1),
-            )
-            scale = Vector3(0.05, 0.05, 0.05)
-            self.markers.publishText(text_pose, f"Pose {i+1}", "white", scale, 0)
+            # Display all successful poses with a different visualization
+            rospy.loginfo(f"Displaying {len(self.successful_poses)} successful poses")
+            for i, pose in enumerate(self.successful_poses):
+                # Create pose text label
+                text_pose = Pose(
+                    Point(pose.position.x, pose.position.y, pose.position.z + 0.1),
+                    Quaternion(0, 0, 0, 1),
+                )
+                scale = Vector3(0.05, 0.05, 0.05)
+                self.markers.publishText(text_pose, f"Pose {i+1}", "white", scale, 0)
 
-            # Highlight successful pose with larger axis
-            self.markers.publishAxis(pose, 0.15, 0.015, 0)
-            self.markers.publishSphere(pose, "green", 0.03, 0)
+                # Highlight successful pose with larger axis
+                self.markers.publishAxis(pose, 0.15, 0.015, 0)
+                self.markers.publishSphere(pose, "green", 0.03, 0)
 
-        return successful_count
+        except KeyboardInterrupt:
+            rospy.loginfo("Interrupted by user, shutting down worker threads")
+            self.shutdown_event.set()
+
+            # Wait for threads to finish with timeout
+            for thread in threads:
+                thread.join(timeout=2.0)
+
+        return self.success_count
 
     def cleanup(self):
         """Clean up resources before shutting down"""
         rospy.loginfo("Cleaning up...")
+        # Signal all threads to stop
+        self.shutdown_event.set()
         # Delete all markers
         self.markers.deleteAllMarkers()
 
