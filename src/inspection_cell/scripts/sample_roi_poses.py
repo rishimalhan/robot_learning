@@ -17,6 +17,7 @@ from moveit_msgs.msg import PlanningScene
 import rviz_tools_py as viz
 import tf2_ros
 import ros_numpy
+import numpy as np
 
 
 class PoseSampler:
@@ -137,7 +138,7 @@ class PoseSampler:
         # Publish TF frames for the pose and end-effector pose
         transforms = []
 
-        # Create transform for TCP pose
+        # Create transform for TCP pose (world to TCP)
         tcp_transform = TransformStamped()
         tcp_transform.header.stamp = rospy.Time.now()
         tcp_transform.header.frame_id = "world"
@@ -153,18 +154,34 @@ class PoseSampler:
         # Get end-effector pose
         eef_pose = self.env.get_end_effector_transform(pose)
 
-        # Create transform for end-effector pose
-        eef_transform = TransformStamped()
-        eef_transform.header.stamp = rospy.Time.now()
-        eef_transform.header.frame_id = "world"
-        eef_transform.child_frame_id = "eef_pose"
+        # Create direct transform from TCP to end-effector
+        tcp_to_eef = TransformStamped()
+        tcp_to_eef.header.stamp = rospy.Time.now()
+        tcp_to_eef.header.frame_id = "sampled_pose"
+        tcp_to_eef.child_frame_id = "eef_pose"
 
-        # Set translation and rotation
-        eef_transform.transform.translation.x = eef_pose.position.x
-        eef_transform.transform.translation.y = eef_pose.position.y
-        eef_transform.transform.translation.z = eef_pose.position.z
-        eef_transform.transform.rotation = eef_pose.orientation
-        transforms.append(eef_transform)
+        # Calculate the relative transform from TCP to end-effector
+        # Get TCP and end-effector poses as numpy matrices
+        tcp_matrix = ros_numpy.numpify(pose)
+        eef_matrix = ros_numpy.numpify(eef_pose)
+
+        # Calculate relative transform: tcp_T_eef = inv(tcp_T_world) * eef_T_world
+        relative_transform = np.matmul(np.linalg.inv(tcp_matrix), eef_matrix)
+
+        # Extract translation and rotation from the relative transform
+        translation = relative_transform[:3, 3]
+        rotation = quaternion_from_matrix(relative_transform)
+
+        # Set the transform values
+        tcp_to_eef.transform.translation.x = translation[0]
+        tcp_to_eef.transform.translation.y = translation[1]
+        tcp_to_eef.transform.translation.z = translation[2]
+        tcp_to_eef.transform.rotation.x = rotation[0]
+        tcp_to_eef.transform.rotation.y = rotation[1]
+        tcp_to_eef.transform.rotation.z = rotation[2]
+        tcp_to_eef.transform.rotation.w = rotation[3]
+
+        transforms.append(tcp_to_eef)
 
         # Send the transforms using the class member broadcaster
         self.tf_broadcaster.sendTransform(transforms)
