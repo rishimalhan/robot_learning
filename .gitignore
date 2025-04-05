@@ -3,6 +3,7 @@ install/
 logs/
 log/
 deps/
+data/
 .DS_Store
 devel/
 .catkin_tools/
