@@ -108,7 +108,7 @@ part:
   color: [0.922, 0.918, 0.88]
   alpha: 1.0
   scale: [0.008, 0.008, 0.008]
-  collision_enabled: false
+  collision_enabled: true
 
 tool:
   type: mesh

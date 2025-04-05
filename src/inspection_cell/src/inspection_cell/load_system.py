@@ -396,7 +396,7 @@ class EnvironmentLoader:
                     current_acm.entry_values[index].enabled.extend(
                         [False] * len(added_objects)
                     )
-                    rospy.loginfo(
+                    rospy.logdebug(
                         f"Extended entry at index {index} for object {current_acm.entry_names[index]} to handle {len(added_objects)} new objects"
                     )
                 # Add object to entry names
@@ -407,7 +407,7 @@ class EnvironmentLoader:
                     entry = AllowedCollisionEntry()
                     entry.enabled = [False] * len(current_acm.entry_names)
                     current_acm.entry_values.append(entry)
-                    rospy.loginfo(
+                    rospy.logdebug(
                         f"Added new entry for {object_id} at index {index+len(existing_entry_indices)} with {len(entry.enabled)} values"
                     )
 

@@ -276,8 +276,71 @@ Visualization Manager:
       Marker Topic: /viz
       Name: Marker
       Namespaces:
-        {}
+        Cylinder: true
+        Sphere: true
       Queue Size: 100
+      Value: true
+    - Class: rviz/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: false
+        base:
+          Value: false
+        base_link:
+          Value: false
+        eef_pose:
+          Value: true
+        link_1:
+          Value: false
+        link_2:
+          Value: false
+        link_3:
+          Value: false
+        link_4:
+          Value: false
+        link_5:
+          Value: false
+        link_6:
+          Value: false
+        map:
+          Value: false
+        sampled_pose:
+          Value: true
+        tcp:
+          Value: false
+        tool0:
+          Value: false
+        world:
+          Value: false
+      Marker Alpha: 1
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          world:
+            base_link:
+              base:
+                {}
+              link_1:
+                link_2:
+                  link_3:
+                    link_4:
+                      link_5:
+                        link_6:
+                          tool0:
+                            tcp:
+                              {}
+            eef_pose:
+              {}
+            sampled_pose:
+              {}
+      Update Interval: 0
       Value: true
   Enabled: true
   Global Options:
