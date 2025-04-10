@@ -57,6 +57,10 @@ class PoseSampler:
         self.success_count_lock = threading.Lock()
         self.success_count = 0
 
+        # Flag to control planning after successful plan
+        self.wait_for_execution = threading.Event()
+        self.execution_in_progress = threading.Event()
+
         # Flag for TF visualization - only show for executing poses
         self.show_tf = False
         self.current_executing_pose = None
@@ -403,6 +407,15 @@ class PoseSampler:
         attempt_count = 0
 
         while attempt_count < max_attempts and not self.shutdown_event.is_set():
+            # If we're waiting for execution to complete, pause sampling
+            if self.wait_for_execution.is_set():
+                rospy.loginfo(
+                    "Waiting for execution to complete before sampling next pose..."
+                )
+                self.wait_for_execution.wait()
+                self.wait_for_execution.clear()
+                continue
+
             # Sample a random pose within the ROI
             pose = self.sample_pose_within_roi(max_angle=max_angle)
             if not pose:
@@ -436,8 +449,32 @@ class PoseSampler:
         """Worker thread that plans paths for sampled poses."""
         while not self.shutdown_event.is_set():
             try:
+                # If we're waiting for execution to complete, pause planning
+                if self.wait_for_execution.is_set():
+                    rospy.loginfo(
+                        "Waiting for execution to complete before planning next pose..."
+                    )
+                    # Clear any remaining items in the planning queue
+                    while not self.planning_queue.empty():
+                        try:
+                            self.planning_queue.get_nowait()
+                            self.planning_queue.task_done()
+                        except queue.Empty:
+                            break
+                    # Wait for execution to complete
+                    self.wait_for_execution.wait()
+                    self.wait_for_execution.clear()
+                    # Small delay to ensure execution is fully complete
+                    rospy.sleep(0.1)
+                    continue
+
                 # Get a pose from the queue
-                pose, attempt_number = self.planning_queue.get(block=True, timeout=1.0)
+                try:
+                    pose, attempt_number = self.planning_queue.get(
+                        block=True, timeout=1.0
+                    )
+                except queue.Empty:
+                    continue
 
                 # Visualize the pose when we start planning for it (but don't show TF)
                 self.visualize_pose(pose, show_tf=False)
@@ -456,11 +493,21 @@ class PoseSampler:
                         f"Plan for pose {attempt_number} successful, planning time: {planning_time:.2f}s, total: {total_time:.2f}s"
                     )
 
-                    # Add plan to execution queue
+                    # Add plan to execution queue and wait for execution
                     try:
                         self.execution_queue.put(
                             (pose, plan, attempt_number), block=True, timeout=1.0
                         )
+                        # Set flag to wait for execution
+                        self.wait_for_execution.set()
+                        self.execution_in_progress.set()
+                        # Clear the planning queue to prevent other planners from continuing
+                        while not self.planning_queue.empty():
+                            try:
+                                self.planning_queue.get_nowait()
+                                self.planning_queue.task_done()
+                            except queue.Empty:
+                                break
                     except queue.Full:
                         rospy.logwarn(
                             f"Execution queue full, dropping plan for pose {attempt_number}"
@@ -475,9 +522,8 @@ class PoseSampler:
                 # Mark planning task as done
                 self.planning_queue.task_done()
 
-            except queue.Empty:
-                # If there's nothing in the queue, sleep briefly
-                rospy.sleep(0.1)
+            except Exception as e:
+                rospy.logerr(f"Error in planner worker: {e}")
                 continue
 
         rospy.loginfo("Planner worker finished")
@@ -490,14 +536,17 @@ class PoseSampler:
                 with self.success_count_lock:
                     if self.success_count >= target_success_count:
                         rospy.loginfo(
-                            f"Reached target of {target_success_count} successful poses, executor stopping"
+                            f"Reached target of {target_success_count} successful poses"
                         )
                         break
 
                 # Get a plan from the queue
-                pose, plan, attempt_number = self.execution_queue.get(
-                    block=True, timeout=1.0
-                )
+                try:
+                    pose, plan, attempt_number = self.execution_queue.get(
+                        block=True, timeout=1.0
+                    )
+                except queue.Empty:
+                    continue
 
                 # Update the currently executing pose and show TF for it
                 self.visualize_pose(pose, show_tf=True)
@@ -568,12 +617,13 @@ class PoseSampler:
                         executor.shutdown(wait=False)
                     loop.close()
 
-                # Mark execution task as done
+                # Mark execution task as done and signal planner to continue
                 self.execution_queue.task_done()
+                self.execution_in_progress.clear()
+                self.wait_for_execution.clear()
 
-            except queue.Empty:
-                # If there's nothing in the queue, sleep briefly
-                rospy.sleep(0.1)
+            except Exception as e:
+                rospy.logerr(f"Error in executor worker: {e}")
                 continue
 
         rospy.loginfo("Executor worker finished")
