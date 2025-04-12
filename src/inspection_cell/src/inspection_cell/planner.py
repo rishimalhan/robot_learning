@@ -6,13 +6,13 @@ import rospy
 import numpy as np
 from moveit_commander import MoveGroupCommander, RobotCommander
 import ros_numpy
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple, Callable, Any, Union
 from functools import partial
 
 # Internal
 
 from inspection_cell.error_codes import get_error_code_name, get_error_description
+from inspection_cell.stats_reporter import report_planning_stats, stats_reporter
 
 
 class Planner:
@@ -42,22 +42,14 @@ class Planner:
 
         # Define available planners for different types of motion
         self.point_to_point_planners = [
+            "RRTkConfigDefault",
             "RRTConnectkConfigDefault",
             "RRTstarkConfigDefault",
-            "PRMkConfigDefault",
-            "PRMstarkConfigDefault",
         ]
-
         self.cartesian_planners = [
-            "RRTConnectkConfigDefault",
             "TRRTkConfigDefault",
             "ESTkConfigDefault",
         ]
-
-        # Thread pool for parallel planning
-        self.executor = ThreadPoolExecutor(
-            max_workers=len(self.point_to_point_planners) + len(self.cartesian_planners)
-        )
 
         rospy.loginfo(f"Planner initialized for group: {move_group_name}")
         rospy.loginfo(f"Planning frame: {self.move_group.get_planning_frame()}")
@@ -98,6 +90,7 @@ class Planner:
         rospy.loginfo("Planning to home position...")
         return self.plan_to_named_target("home", planner_id)
 
+    @report_planning_stats
     def _execute_planning_task(
         self, planning_func: Callable, planner_id: str, *args, **kwargs
     ) -> Tuple[bool, Optional[object], float, int]:
@@ -153,21 +146,23 @@ class Planner:
             rospy.logerr(f"Error in cartesian planning with {planner_id}: {str(e)}")
             return None, 0.0, 0.0
 
-    def _run_parallel_planning(
+    def _run_sequential_planning(
         self,
         planners: List[str],
         planning_func: Callable,
         is_cartesian: bool = False,
+        all_planners: bool = False,
         *args,
         **kwargs,
     ) -> Union[Tuple[bool, object, float, int], Tuple[object, float, float]]:
         """
-        Run multiple planners in parallel and return the best result.
+        Run multiple planners sequentially and return the first successful result.
 
         Args:
             planners: List of planner IDs to try
             planning_func: The planning function to execute
             is_cartesian: Whether this is a cartesian planning task
+            all_planners: If True, try all planners even after finding a successful one
             *args: Positional arguments for the planning function
             **kwargs: Keyword arguments for the planning function
 
@@ -175,53 +170,49 @@ class Planner:
             For point-to-point: (success, plan, planning_time, error_code)
             For cartesian: (plan, fraction, planning_time)
         """
-        results = {}
-        futures = []
+        best_result = None
+        best_planner = None
 
-        # Submit planning tasks to thread pool
         for planner_id in planners:
-            if is_cartesian:
-                future = self.executor.submit(
-                    self._execute_cartesian_task,
-                    planning_func,
-                    planner_id,
-                    *args,
-                    **kwargs,
-                )
-            else:
-                future = self.executor.submit(
-                    self._execute_planning_task,
-                    planning_func,
-                    planner_id,
-                    *args,
-                    **kwargs,
-                )
-            futures.append((planner_id, future))
+            rospy.loginfo(f"Planning with: {planner_id}")
 
-        # Collect results
-        for planner_id, future in futures:
-            result = future.result()
             if is_cartesian:
-                plan, fraction, planning_time = result
+                plan, fraction, planning_time = self._execute_cartesian_task(
+                    planning_func, planner_id, *args, **kwargs
+                )
                 if fraction > 0.9:
-                    results[planner_id] = (plan, fraction, planning_time)
+                    rospy.loginfo(
+                        f"Cartesian plan found with {planner_id} (fraction: {fraction})"
+                    )
+                    if not all_planners:
+                        return plan, fraction, planning_time
+                    if best_result is None or fraction > best_result[1]:
+                        best_result = (plan, fraction, planning_time)
+                        best_planner = planner_id
             else:
-                success, plan, planning_time, error_code = result
+                success, plan, planning_time, error_code = self._execute_planning_task(
+                    planning_func, planner_id, *args, **kwargs
+                )
+                rospy.loginfo(
+                    f"Planning with {planner_id} succeeded: {success} in time {planning_time} with error code {error_code}"
+                )
                 if success:
-                    results[planner_id] = (plan, planning_time, error_code)
+                    if not all_planners:
+                        return True, plan, planning_time, error_code
+                    # Store the result as (planning_time, plan, error_code) for easier comparison
+                    if best_result is None or planning_time < best_result[0]:
+                        best_result = (planning_time, plan, error_code)
+                        best_planner = planner_id
 
-        # Return the best result
-        if results:
+        if best_result is not None:
             if is_cartesian:
-                best_planner = max(results, key=lambda k: results[k][1])
-                plan, fraction, planning_time = results[best_planner]
+                plan, fraction, planning_time = best_result
                 rospy.loginfo(
                     f"Using cartesian plan from {best_planner} with fraction {fraction}"
                 )
                 return plan, fraction, planning_time
             else:
-                best_planner = next(iter(results))
-                plan, planning_time, error_code = results[best_planner]
+                planning_time, plan, error_code = best_result
                 rospy.loginfo(f"Using plan from {best_planner}")
                 return True, plan, planning_time, error_code
         else:
@@ -272,14 +263,17 @@ class Planner:
                     f"Cartesian planning only achieved {fraction:.2%} completion"
                 )
 
-    def plan_to_named_target(self, target_name: str, planner_id: str = None):
+    def plan_to_named_target(
+        self, target_name: str, planner_id: str = None, all_planners: bool = False
+    ):
         """
         Plan a motion to a named target position defined in the SRDF.
-        Can use either a single planner or try multiple planners in parallel.
+        Can use either a single planner or try multiple planners sequentially.
 
         Args:
             target_name: Name of the predefined target position
-            planner_id: If specified, use this single planner. If None, try multiple planners in parallel.
+            planner_id: If specified, use this single planner. If None, try multiple planners sequentially.
+            all_planners: If True, try all planners even after finding a successful one
 
         Returns:
             tuple: (success, plan, planning_time, error_code)
@@ -302,8 +296,8 @@ class Planner:
                 planning_func, planner_id
             )
         else:
-            success, plan, planning_time, error_code = self._run_parallel_planning(
-                self.point_to_point_planners, planning_func
+            success, plan, planning_time, error_code = self._run_sequential_planning(
+                self.point_to_point_planners, planning_func, all_planners=all_planners
             )
 
         self._log_planning_result(
@@ -312,15 +306,19 @@ class Planner:
         return success, plan, planning_time, error_code
 
     def plan_to_joint_target(
-        self, joint_positions: List[float], planner_id: str = None
+        self,
+        joint_positions: List[float],
+        planner_id: str = None,
+        all_planners: bool = False,
     ):
         """
         Plan a motion to the specified joint positions.
-        Can use either a single planner or try multiple planners in parallel.
+        Can use either a single planner or try multiple planners sequentially.
 
         Args:
             joint_positions: List of joint positions in radians
-            planner_id: If specified, use this single planner. If None, try multiple planners in parallel.
+            planner_id: If specified, use this single planner. If None, try multiple planners sequentially.
+            all_planners: If True, try all planners even after finding a successful one
 
         Returns:
             tuple: (success, plan, planning_time, error_code)
@@ -336,21 +334,24 @@ class Planner:
                 planning_func, planner_id
             )
         else:
-            success, plan, planning_time, error_code = self._run_parallel_planning(
-                self.point_to_point_planners, planning_func
+            success, plan, planning_time, error_code = self._run_sequential_planning(
+                self.point_to_point_planners, planning_func, all_planners=all_planners
             )
 
         self._log_planning_result(success, plan, planning_time, error_code)
         return success, plan, planning_time, error_code
 
-    def plan_to_pose_target(self, pose, planner_id: str = None):
+    def plan_to_pose_target(
+        self, pose, planner_id: str = None, all_planners: bool = False
+    ):
         """
         Plan a motion to the specified pose in Cartesian space.
-        Can use either a single planner or try multiple planners in parallel.
+        Can use either a single planner or try multiple planners sequentially.
 
         Args:
             pose: geometry_msgs/Pose target
-            planner_id: If specified, use this single planner. If None, try multiple planners in parallel.
+            planner_id: If specified, use this single planner. If None, try multiple planners sequentially.
+            all_planners: If True, try all planners even after finding a successful one
 
         Returns:
             tuple: (success, plan, planning_time, error_code)
@@ -366,25 +367,31 @@ class Planner:
                 planning_func, planner_id
             )
         else:
-            success, plan, planning_time, error_code = self._run_parallel_planning(
-                self.point_to_point_planners, planning_func
+            success, plan, planning_time, error_code = self._run_sequential_planning(
+                self.point_to_point_planners, planning_func, all_planners=all_planners
             )
 
         self._log_planning_result(success, plan, planning_time, error_code)
         return success, plan, planning_time, error_code
 
     def plan_cartesian_path(
-        self, waypoints, eef_step=0.01, jump_threshold=0.0, planner_id: str = None
+        self,
+        waypoints,
+        eef_step=0.01,
+        jump_threshold=0.0,
+        planner_id: str = None,
+        all_planners: bool = False,
     ):
         """
         Plan a Cartesian path through the specified waypoints.
-        Can use either a single planner or try multiple planners in parallel.
+        Can use either a single planner or try multiple planners sequentially.
 
         Args:
             waypoints: List of geometry_msgs/Pose waypoints
             eef_step: Step size for the end effector (meters)
             jump_threshold: Jump threshold for joint space discontinuities
-            planner_id: If specified, use this single planner. If None, try multiple planners in parallel.
+            planner_id: If specified, use this single planner. If None, try multiple planners sequentially.
+            all_planners: If True, try all planners even after finding a successful one
 
         Returns:
             tuple: (plan, fraction, planning_time)
@@ -401,8 +408,11 @@ class Planner:
                 planning_func, planner_id
             )
         else:
-            plan, fraction, planning_time = self._run_parallel_planning(
-                self.cartesian_planners, planning_func, is_cartesian=True
+            plan, fraction, planning_time = self._run_sequential_planning(
+                self.cartesian_planners,
+                planning_func,
+                is_cartesian=True,
+                all_planners=all_planners,
             )
 
         self._log_planning_result(
@@ -417,18 +427,20 @@ class Planner:
         eef_step=0.01,
         avoid_collisions=True,
         planner_id: str = None,
+        all_planners: bool = False,
     ):
         """
         Plan a linear motion from current end effector position along the specified direction.
         The direction is specified in the end-effector frame.
-        Can use either a single planner or try multiple planners in parallel.
+        Can use either a single planner or try multiple planners sequentially.
 
         Args:
             direction: 3D vector [x, y, z] indicating the direction of motion in the end-effector frame
             distance: Distance to move in meters
             eef_step: Step size for the end effector (meters)
             avoid_collisions: Whether to avoid collisions during planning
-            planner_id: If specified, use this single planner. If None, try multiple planners in parallel.
+            planner_id: If specified, use this single planner. If None, try multiple planners sequentially.
+            all_planners: If True, try all planners even after finding a successful one
 
         Returns:
             tuple: (success, plan, planning_time, error_code)
@@ -471,8 +483,11 @@ class Planner:
                 planning_func, planner_id
             )
         else:
-            plan, fraction, planning_time = self._run_parallel_planning(
-                self.cartesian_planners, planning_func, is_cartesian=True
+            plan, fraction, planning_time = self._run_sequential_planning(
+                self.cartesian_planners,
+                planning_func,
+                is_cartesian=True,
+                all_planners=all_planners,
             )
 
         # Determine success based on the fraction of path achieved
@@ -489,11 +504,37 @@ if __name__ == "__main__":
     # Simple test if this file is run directly
     rospy.init_node("planner_test", anonymous=True)
     planner = Planner()
-    success, plan, planning_time, error_code = planner.plan_to_home()
+
+    # Clear any existing stats
+    stats_reporter.clear()
+
+    # Test planning to home position with all planners
+    success, plan, planning_time, error_code = planner.plan_to_named_target(
+        "all-zeros", all_planners=True
+    )
 
     if success:
         rospy.loginfo("Planning to home position succeeded!")
     else:
         rospy.logerr("Planning to home position failed!")
 
-    rospy.spin()
+    # Print statistics
+    rospy.loginfo("\nPlanning Statistics:")
+    rospy.loginfo(f"Total attempts: {stats_reporter.get_total_attempts()}")
+    rospy.loginfo(f"Successful attempts: {stats_reporter.get_successful_attempts()}")
+    rospy.loginfo(f"Overall success rate: {stats_reporter.get_success_rate():.2%}")
+
+    # Print statistics for each planner
+    for planner_id in [
+        "RRTkConfigDefault",
+        "RRTConnectkConfigDefault",
+        "RRTstarkConfigDefault",
+    ]:
+        stats = stats_reporter.get_stats(planner_id)
+        if stats:
+            success_rate = stats_reporter.get_success_rate(planner_id)
+            avg_time = stats_reporter.get_average_planning_time(planner_id)
+            rospy.loginfo(f"\n{planner_id}:")
+            rospy.loginfo(f"  Success rate: {success_rate:.2%}")
+            rospy.loginfo(f"  Average planning time: {avg_time:.3f} seconds")
+            rospy.loginfo(f"  Total attempts: {len(stats)}")
