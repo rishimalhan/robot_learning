@@ -15,3 +15,59 @@ catkin config \
 ### catkin commands ###
 wstool init /robot_learning/src/deps/ /robot_learning/.rosinstall
 catkin config --jobs 14 -DCMAKE_BUILD_TYPE=Release
+
+
+# Prototyping a learning from demonstration system
+1. Collect demonstrations using a custom built teleop script that used the Quest 3, RAIL teleop app, and the P2 robot's Python API
+2. Demonstrations are saved in a custom data format that's basically pickle files + directories of PNGs for each of the camera feeds
+3. Convert the dataset to the OXE/tfrecords data format Octo expected
+4. Train Octo using the demonstrations
+5. Deploy the octo model for evaluation using an interface similar to the interface we built for the teleop app in step 1
+
+# Prototyping a Agent based robotic cell
+
+
+# Figure out:
+- AgiBot: multi-task, multi-embodiment VLAs
+
+# Resources:
+nvidia:cosmos-reason1 (physical common sense reasoning and embodied reasoning (e.g. manipulation), beating existing larger models like Qwen2.5-VL-72B, 4o, and o1 with its 8B parameter model in its embodied reasoning benchmark.)
+
+https://www.anthropic.com/research/tracing-thoughts-language-model
+
+https://nvlabs.github.io/PS3/
+
+https://sites.google.com/view/taeyeop-lee/any6d
+
+https://developer.nvidia.com/blog/nvidia-cuml-brings-zero-code-change-acceleration-to-scikit-learn/?ncid=so-twit-383717&linkId=100000349690986
+
+https://vgg-t.github.io/
+
+https://zhanghe3z.github.io/FLARE/
+
+https://deepmind.google/discover/blog/gemini-robotics-brings-ai-into-the-physical-world/
+
+https://scalable-real2sim.github.io/
+
+https://github.com/SJTU-MVCLab/SeeLe
+
+https://unified-video-action-model.github.io/
+
+https://www.microsoft.com/en-us/research/blog/magma-a-foundation-model-for-multimodal-ai-agents-across-digital-and-physical-worlds/
+
+https://robo-point.github.io/
+
+https://arxiv.org/abs/2502.12894
+
+https://huggingface.co/spaces/nanotron/ultrascale-playbook
+
+https://research.nvidia.com/labs/lpr/l4p/
+
+https://scenefun3d.github.io/
+
+https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/
+
+labelbox: paid for data collection
+
+https://machinelearning.apple.com/research/elegnt-expressive-functional-movement
+

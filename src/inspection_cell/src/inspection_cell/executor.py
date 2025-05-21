@@ -6,8 +6,6 @@ import threading
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from moveit_commander import MoveGroupCommander, RobotCommander
-from inspection_cell.collision_checker import CollisionCheck
-from moveit_msgs.msg import RobotTrajectory
 
 
 class Executor:

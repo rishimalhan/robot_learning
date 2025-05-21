@@ -6,10 +6,6 @@ import rospy
 import random
 import math
 import threading
-import queue
-import asyncio
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from tf.transformations import (
     quaternion_from_euler,
     quaternion_multiply,
@@ -19,17 +15,16 @@ import traceback
 import argparse
 from geometry_msgs.msg import Pose, Point, Quaternion, Vector3, TransformStamped
 from shape_msgs.msg import SolidPrimitive
-from moveit_msgs.msg import PlanningScene
 import rviz_tools_py as viz
 import tf2_ros
 import ros_numpy
 import numpy as np
-import time
 
 
 # External
 
 from inspection_cell.load_system import EnvironmentLoader
+from inspection_cell.stats_reporter import stats_reporter
 
 
 class PoseSampler:
@@ -281,6 +276,44 @@ class PoseSampler:
                     )
                 )
 
+                # Log planning statistics
+                rospy.loginfo("\n" + "=" * 50)
+                rospy.loginfo("PLANNING STATISTICS".center(50))
+                rospy.loginfo("=" * 50)
+
+                # Get all unique planner IDs from the stats
+                all_stats = stats_reporter.get_stats()
+                planner_ids = {stat.planner_id for stat in all_stats}
+
+                if planner_ids:
+                    rospy.loginfo("PLANNER PERFORMANCE".center(50))
+                    rospy.loginfo("-" * 50)
+
+                    # Print header
+                    rospy.loginfo(
+                        f"{'Planner':<20} {'Success':>8} {'Failed':>8} {'Rate':>8} {'Avg Time':>10} {'Length':>10}"
+                    )
+                    rospy.loginfo("-" * 50)
+
+                    # Print each planner's stats
+                    for planner_id in sorted(planner_ids, key=str):
+                        summary = stats_reporter.get_planner_summary(planner_id)
+                        if summary:
+                            # Format the planner name to be more readable
+                            planner_name = str(planner_id).replace("kConfigDefault", "")
+                            rospy.loginfo(
+                                f"{planner_name:<20} "
+                                f"{summary['successful_attempts']:>8d} "
+                                f"{summary['failed_attempts']:>8d} "
+                                f"{summary['success_rate']:>7.1%} "
+                                f"{summary['average_planning_time']:>9.3f}s "
+                                f"{summary['average_path_length']:>9.3f}"
+                            )
+                else:
+                    rospy.loginfo("No planner statistics available yet")
+
+                rospy.loginfo("=" * 50 + "\n")
+
                 if success and plan:
                     rospy.loginfo(f"Found valid plan in {planning_time:.2f}s")
                     self.current_plan = (pose, plan)
@@ -514,6 +547,9 @@ def main():
 
         # Parse arguments without actual sys.argv to avoid interfering with ROS
         args = parser.parse_args(rospy.myargv()[1:])
+
+        # Clear any existing stats
+        stats_reporter.clear()
 
         # Create the pose sampler
         sampler = PoseSampler()

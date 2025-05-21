@@ -108,6 +108,7 @@ class Planner:
         """
         try:
             self.move_group.set_planner_id(planner_id)
+            rospy.logdebug(f"Using planner: {planner_id}")
             return planning_func(*args, **kwargs)
         except Exception as e:
             rospy.logerr(f"Error in planning with {planner_id}: {str(e)}")
