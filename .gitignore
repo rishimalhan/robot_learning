@@ -6,6 +6,7 @@ deps/
 data/
 .DS_Store
 devel/
+wandb/
 .catkin_tools/
 *.pyc
 __pycache__/
