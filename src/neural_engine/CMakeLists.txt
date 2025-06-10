@@ -164,6 +164,8 @@ include_directories(
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   src/neural_engine/simulated_perception.py
+  src/neural_engine/inference_engine.py
+  src/neural_engine/common.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

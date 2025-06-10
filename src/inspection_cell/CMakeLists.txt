@@ -9,12 +9,7 @@ project(inspection_cell)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   rospy
-  std_msgs
-  abb_irb2400_support
-  abb_irb2400_moveit_config
-  neural_engine
-  message_generation
-  rviz_tools_py
+  core
 )
 
 ## System dependencies are found with CMake's conventions
@@ -110,10 +105,7 @@ catkin_package(
 #  LIBRARIES inspection_cell
   CATKIN_DEPENDS 
   rospy 
-  std_msgs 
-  abb_irb2400_support 
-  abb_irb2400_moveit_config 
-  neural_engine
+  core
 #  DEPENDS system_lib
 )
 
@@ -168,13 +160,7 @@ include_directories(
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
-  src/inspection_cell/load_system.py
-  src/inspection_cell/planner.py
-  src/inspection_cell/executor.py
-  src/inspection_cell/point_cloud_processor.py
   scripts/test_move_robot.py
-  scripts/test_collision_checker.py
-  scripts/sample_roi_poses.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

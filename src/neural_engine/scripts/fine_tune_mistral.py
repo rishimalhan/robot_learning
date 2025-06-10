@@ -21,15 +21,20 @@ that are not changed during training. There are several adapters for different t
 """
 
 import os
-import json
-from datasets import Dataset
 from transformers import (
     TrainingArguments,
     Trainer,
     DataCollatorForLanguageModeling,
 )
-from common import load_model, load_tokenizer, DATASET_PATH, OUTPUT_DIR
+from neural_engine.common import (
+    load_model,
+    load_tokenizer,
+    DATASET_PATH,
+    OUTPUT_DIR,
+    load_and_prepare_dataset,
+)
 import logging
+
 
 # Setup logging
 logging.basicConfig(
@@ -44,26 +49,6 @@ LEARNING_RATE = 2e-5
 
 logging.info(f"Dataset path: {DATASET_PATH}")
 logging.info(f"Output directory: {OUTPUT_DIR}")
-
-
-def load_and_prepare_dataset() -> Dataset:
-    """Load the pharma JSON dataset and convert it to HuggingFace Dataset format."""
-    logging.info("Loading pharma assistant dataset...")
-
-    # Load JSON data
-    with open(DATASET_PATH, "r") as f:
-        data = json.load(f)
-
-    # Convert user-assistant pairs into structured training samples
-    formatted_data = []
-    for item in data["messages"]:
-        formatted_data.append({"text": item})
-
-    logging.info(f"Prepared {len(formatted_data)} training samples from dataset.")
-
-    # Convert to Hugging Face Dataset
-    dataset = Dataset.from_list(formatted_data)
-    return dataset
 
 
 def log_token_length_stats(dataset, tokenizer):

@@ -71,3 +71,6 @@ labelbox: paid for data collection
 
 https://machinelearning.apple.com/research/elegnt-expressive-functional-movement
 
+https://real2render2real.com/
+
+https://research.nvidia.com/labs/gear/dreamgen/

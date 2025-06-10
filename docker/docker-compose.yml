@@ -13,8 +13,8 @@ services:
     stdin_open: true
     tty: true
     environment:
-      - ROS_MASTER_URI=http://192.168.0.31:11311
-      - ROS_IP=192.168.0.31
+      - ROS_MASTER_URI=http://10.0.0.117:11311
+      - ROS_IP=10.0.0.117
       - DISPLAY=:1
       - QT_X11_NO_MITSHM=1
       - QT_QPA_PLATFORM=xcb
