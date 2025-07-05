@@ -53,7 +53,7 @@ def main():
         orientation = current_pose.orientation
 
         # Calculate Z position with 0.4m lower than current
-        z_position = current_pose.position.z - 0.4
+        z_position = current_pose.position.z - 0.3
 
         # Step 2: Set up zigzag pattern waypoints
         rospy.loginfo("Step 2: Setting up zigzag pattern waypoints...")
