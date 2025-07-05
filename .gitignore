@@ -10,3 +10,50 @@ wandb/
 .catkin_tools/
 *.pyc
 __pycache__/
+
+# Python egg info and distribution
+*.egg-info/
+dist/
+*.egg
+
+# Python virtual environments
+venv/
+env/
+.env
+.venv
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ROS specific
+*.bag
+*.launch~
+*.urdf~
+*.xacro~
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# OS generated files
+Thumbs.db
+*.tmp
+*.temp
