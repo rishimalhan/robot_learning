@@ -6,8 +6,7 @@ import rospy
 import numpy as np
 from moveit_commander import MoveGroupCommander, RobotCommander
 import ros_numpy
-from typing import List, Dict, Optional, Tuple, Callable, Any, Union
-from functools import partial
+from typing import List, Optional, Tuple, Callable, Union
 
 # Internal
 

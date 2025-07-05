@@ -12,7 +12,6 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   abb_irb2400_support
   abb_irb2400_moveit_config
-  neural_engine
   message_generation
   rviz_tools_py
 )
@@ -113,7 +112,6 @@ catkin_package(
   std_msgs 
   abb_irb2400_support 
   abb_irb2400_moveit_config 
-  neural_engine
 #  DEPENDS system_lib
 )
 
@@ -199,11 +197,9 @@ catkin_install_python(PROGRAMS
 # )
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)
-install(DIRECTORY
-  launch/
-  config/
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
+# install(DIRECTORY
+#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+# )
 
 #############
 ## Testing ##

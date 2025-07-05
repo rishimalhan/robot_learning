@@ -1,0 +1,9 @@
+# Request
+float32 vert_angle      # Vertical angle in degrees (camera tilt from vertical)
+float32 horz_angle      # Horizontal angle in degrees (camera rotation around Z)
+int32 num_samples       # Number of random samples to generate
+---
+# Response
+bool success            # True if viewpoints were generated successfully
+string message          # Status message
+geometry_msgs/Pose[] viewpoints  # Generated viewpoints 

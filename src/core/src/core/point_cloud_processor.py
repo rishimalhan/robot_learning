@@ -12,179 +12,184 @@ from collections import deque
 
 
 class PointCloudProcessor:
-    def __init__(self):
-        # Initialize collections to store point clouds
-        self.pointcloud_buffer = deque(maxlen=1000)
+    def __init__(
+        self,
+        enable_reconstruction=False,
+        enable_mesh=False,
+        enable_cad=False,
+        voxel_size=0.001,
+        buffer_size=1000,
+        mesh_interval=10,
+        alpha=1.0,
+    ):
+        """
+        Initialize PointCloudProcessor with configurable features
+
+        Args:
+            enable_reconstruction (bool): Enable point cloud reconstruction
+            enable_mesh (bool): Enable mesh generation
+            enable_cad (bool): Enable CAD feature extraction
+            voxel_size (float): Voxel size for downsampling
+            buffer_size (int): Point cloud buffer size
+            mesh_interval (int): Mesh update interval
+            alpha (float): Alpha value for mesh reconstruction
+        """
+        self.enable_reconstruction = enable_reconstruction
+        self.enable_mesh = enable_mesh
+        self.enable_cad = enable_cad
+        self.voxel_size = voxel_size
+        self.alpha = alpha
+        self.mesh_interval = mesh_interval
+
+        # Initialize based on enabled features
         self.latest_pointcloud = None
-        self.augmented_pointcloud = None
+        self.point_count = 0
 
-        # Initialize Open3D objects for point cloud management
-        self.global_pcd = o3d.geometry.PointCloud()
+        if enable_reconstruction or enable_mesh or enable_cad:
+            self.pointcloud_buffer = deque(maxlen=buffer_size)
+            self.global_pcd = o3d.geometry.PointCloud()
+            o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
+        else:
+            self.pointcloud_buffer = None
+            self.global_pcd = None
 
-        # Parameters for point cloud processing
-        self.voxel_size = 0.001  # 1mm voxel size for deduplication
+        # Publishers
+        self.reconstruction_pub = rospy.Publisher(
+            "reconstruction", PointCloud2, queue_size=1
+        )
+        if enable_mesh:
+            self.mesh_pub = rospy.Publisher(
+                "reconstructed_mesh", MarkerArray, queue_size=1
+            )
+        if enable_cad:
+            self.cad_pub = rospy.Publisher("cad_features", MarkerArray, queue_size=1)
 
-        # Subscribe to the camera pointcloud topic
+        # Subscriber
         self.pointcloud_sub = rospy.Subscriber(
             "camera/points", PointCloud2, self.pointcloud_callback, queue_size=1
         )
 
-        # Set up publisher for the augmented pointcloud
-        self.reconstruction_pub = rospy.Publisher(
-            "reconstruction", PointCloud2, queue_size=1
-        )
-
-        # Set up publisher for the reconstructed mesh
-        self.mesh_pub = rospy.Publisher("reconstructed_mesh", MarkerArray, queue_size=1)
-
-        # Mesh reconstruction parameters
-        self.alpha = 1.0  # Alpha value for Alpha shape reconstruction
-        self.downsample_voxel_size = (
-            0.001  # Downsample to 1mm voxels before mesh creation
-        )
-        self.min_mesh_points = 100  # Minimum points needed for mesh reconstruction
-        self.mesh_color = [0.0, 0.8, 0.3, 1.0]  # RGBA (green)
-        self.mesh_publish_interval = 10
-        self.point_count = 0
-
-        # Suppress Open3D console output to avoid flooding
-        o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
-
+        features = []
+        if enable_reconstruction:
+            features.append("reconstruction")
+        if enable_mesh:
+            features.append("mesh")
+        if enable_cad:
+            features.append("cad")
         rospy.loginfo(
-            "PointCloud processor initialized with Open3D-based point storage"
+            f"PointCloud processor initialized with: {', '.join(features) if features else 'basic publishing'}"
         )
 
     def pointcloud_callback(self, cloud_msg):
-        """Process incoming pointcloud data using efficient point cloud management"""
-        # Store the message
+        """Process incoming pointcloud data"""
         self.latest_pointcloud = cloud_msg
 
-        # Convert PointCloud2 to a numpy array of points
-        points = pc2.read_points(cloud_msg, skip_nans=True)
-        points_array = np.array(list(points))
+        # Basic publishing (always enabled)
+        self._publish_basic_pointcloud()
 
-        if len(points_array) == 0:
-            rospy.logwarn("Received empty pointcloud")
+        # Advanced processing only if enabled
+        if self.enable_reconstruction or self.enable_mesh or self.enable_cad:
+            points = pc2.read_points(cloud_msg, skip_nans=True)
+            points_array = np.array(list(points))
+
+            if len(points_array) == 0:
+                return
+
+            self.pointcloud_buffer.append(points_array)
+
+            # Convert to Open3D and integrate
+            new_pcd = o3d.geometry.PointCloud()
+            new_pcd.points = o3d.utility.Vector3dVector(points_array[:, :3])
+            self._integrate_pointcloud(new_pcd)
+
+            if self.enable_reconstruction:
+                self._publish_reconstruction()
+            if self.enable_mesh:
+                self._publish_mesh()
+            if self.enable_cad:
+                self._publish_cad_features()
+
+    def _publish_basic_pointcloud(self):
+        """Publish basic pointcloud with world frame"""
+        if self.latest_pointcloud is None:
             return
 
-        # Convert numpy array to Open3D point cloud
-        new_pcd = o3d.geometry.PointCloud()
-        new_pcd.points = o3d.utility.Vector3dVector(points_array[:, :3])
+        cloud_msg = PointCloud2()
+        cloud_msg.header.stamp = rospy.Time.now()
+        cloud_msg.header.frame_id = "world"
+        cloud_msg.height = self.latest_pointcloud.height
+        cloud_msg.width = self.latest_pointcloud.width
+        cloud_msg.fields = self.latest_pointcloud.fields
+        cloud_msg.is_bigendian = self.latest_pointcloud.is_bigendian
+        cloud_msg.point_step = self.latest_pointcloud.point_step
+        cloud_msg.row_step = self.latest_pointcloud.row_step
+        cloud_msg.data = self.latest_pointcloud.data
+        cloud_msg.is_dense = self.latest_pointcloud.is_dense
 
-        # Add to buffer for reference
-        self.pointcloud_buffer.append(points_array)
+        self.reconstruction_pub.publish(cloud_msg)
 
-        # Integrate the new points with the global point cloud
-        self._integrate_point_cloud(new_pcd)
-
-        # Create augmented pointcloud
-        self.create_augmented_pointcloud()
-
-    def _integrate_point_cloud(self, new_pcd):
-        """Integrate new points into the global point cloud using voxel grid merging"""
-        # If global point cloud is empty, just use the new points
+    def _integrate_pointcloud(self, new_pcd):
+        """Integrate new points into global point cloud"""
         if len(self.global_pcd.points) == 0:
             self.global_pcd = new_pcd
-            rospy.loginfo(
-                f"Initialized global point cloud with {len(new_pcd.points)} points"
-            )
-            return
+        else:
+            combined_pcd = self.global_pcd + new_pcd
+            self.global_pcd = combined_pcd.voxel_down_sample(voxel_size=self.voxel_size)
 
-        # Combine global and new point clouds
-        combined_pcd = self.global_pcd + new_pcd
-
-        # Use voxel downsampling to merge nearby points
-        # This maintains the point density without duplicating points
-        self.global_pcd = combined_pcd.voxel_down_sample(voxel_size=self.voxel_size)
-
-        # Log the result
-        rospy.logdebug(
-            f"Integrated {len(new_pcd.points)} new points. Global cloud now has {len(self.global_pcd.points)} points"
-        )
-
-    def _get_persistent_points_as_numpy(self):
-        """Convert the global point cloud to a numpy array for publishing"""
+    def _publish_reconstruction(self):
+        """Publish reconstructed point cloud"""
         if len(self.global_pcd.points) == 0:
-            return None
-
-        # Convert Open3D point cloud to numpy array
-        return np.asarray(self.global_pcd.points)
-
-    def create_augmented_pointcloud(self):
-        """Create an augmented pointcloud from the global point cloud and generate mesh"""
-        # Get points from global point cloud
-        points_array = self._get_persistent_points_as_numpy()
-
-        if points_array is None or len(points_array) == 0:
-            rospy.logwarn("No points available to create augmented pointcloud")
             return
 
-        # Create pointcloud fields (XYZ)
+        points_array = np.asarray(self.global_pcd.points)
         fields = [
             PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
         ]
 
-        # Create header with world frame
         header = std_msgs.msg.Header()
         header.stamp = rospy.Time.now()
-        header.frame_id = "world"  # Explicitly set to world frame
+        header.frame_id = "world"
 
-        # Create PointCloud2 message from persistent points
-        self.augmented_pointcloud = pc2.create_cloud(header, fields, points_array)
+        augmented_pointcloud = pc2.create_cloud(header, fields, points_array)
+        self.reconstruction_pub.publish(augmented_pointcloud)
 
-        # Publish the augmented pointcloud
-        self.reconstruction_pub.publish(self.augmented_pointcloud)
-
-        # Create and publish mesh from the point cloud
-        self.create_and_publish_mesh()
-
-    def create_and_publish_mesh(self):
-        """Create a mesh from the point cloud and publish it as markers"""
-        if len(self.global_pcd.points) < self.min_mesh_points:
+    def _publish_mesh(self):
+        """Create and publish mesh"""
+        if len(self.global_pcd.points) < 100:
             return
 
-        # Only regenerate mesh periodically to avoid overwhelming RViz and console
         self.point_count += 1
-        if self.point_count % self.mesh_publish_interval != 0:
+        if self.point_count % self.mesh_interval != 0:
             return
 
         try:
-            # Make a copy of the global point cloud to avoid modifying it
-            pcd = self.global_pcd.voxel_down_sample(
-                voxel_size=self.downsample_voxel_size
-            )
-
-            # Statistical outlier removal to clean up the point cloud
+            pcd = self.global_pcd.voxel_down_sample(voxel_size=0.001)
             pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
 
-            # Ensure we still have enough points after filtering
-            if len(pcd.points) < self.min_mesh_points:
-                rospy.logwarn(f"Too few points after preprocessing: {len(pcd.points)}")
+            if len(pcd.points) < 100:
                 return
 
-            # Estimate normals
             pcd.estimate_normals(
                 search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
             )
             pcd.orient_normals_consistent_tangent_plane(k=10)
 
-            # Use Alpha shape reconstruction for the visible surfaces
             mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(
                 pcd, self.alpha
             )
-
-            # Clean up the mesh
             mesh.remove_degenerate_triangles()
             mesh.remove_duplicated_triangles()
             mesh.remove_duplicated_vertices()
             mesh.remove_non_manifold_edges()
 
-            # Create marker array
-            marker_array = MarkerArray()
+            vertices = np.asarray(mesh.vertices)
+            triangles = np.asarray(mesh.triangles)
 
-            # Create mesh marker
+            if len(triangles) == 0:
+                return
+
             marker = Marker()
             marker.header.frame_id = "world"
             marker.header.stamp = rospy.Time.now()
@@ -193,24 +198,12 @@ class PointCloudProcessor:
             marker.type = Marker.TRIANGLE_LIST
             marker.action = Marker.ADD
             marker.pose.orientation.w = 1.0
-            marker.scale.x = 1.0
-            marker.scale.y = 1.0
-            marker.scale.z = 1.0
-            marker.color.r = self.mesh_color[0]
-            marker.color.g = self.mesh_color[1]
-            marker.color.b = self.mesh_color[2]
-            marker.color.a = self.mesh_color[3]
+            marker.scale.x = marker.scale.y = marker.scale.z = 1.0
+            marker.color.r = 0.0
+            marker.color.g = 0.8
+            marker.color.b = 0.3
+            marker.color.a = 1.0
 
-            # Add triangles to marker
-            vertices = np.asarray(mesh.vertices)
-            triangles = np.asarray(mesh.triangles)
-
-            # Skip if no triangles were created
-            if len(triangles) == 0:
-                rospy.logwarn("No triangles generated in the mesh")
-                return
-
-            # Add all triangles to the marker
             for triangle in triangles:
                 for vertex_idx in triangle:
                     point = Point()
@@ -219,25 +212,18 @@ class PointCloudProcessor:
                     point.z = vertices[vertex_idx, 2]
                     marker.points.append(point)
 
-            # Add marker to array
+            marker_array = MarkerArray()
             marker_array.markers.append(marker)
-
-            # Publish marker array
             self.mesh_pub.publish(marker_array)
-            rospy.logdebug(
-                f"Published reconstructed mesh with {len(triangles)} triangles"
-            )
 
-        except RuntimeError as e:
-            # Handle Open3D specific errors
-            error_msg = str(e)
-            if "operator()" in error_msg or "Failed to close loop" in error_msg:
-                rospy.logwarn(
-                    "Open3D mesh construction error - using different alpha value next time"
-                )
-                # Adjust alpha value slightly to avoid the same error next time
-                self.alpha = max(0.01, self.alpha * 0.9)
-            else:
-                rospy.logwarn(f"Error creating mesh: {e}")
         except Exception as e:
-            rospy.logwarn(f"Error creating mesh: {e}")
+            if "operator()" in str(e):
+                self.alpha = max(0.01, self.alpha * 0.9)
+            rospy.logwarn(f"Mesh generation error: {e}")
+
+    def _publish_cad_features(self):
+        """Publish CAD features (placeholder)"""
+        if len(self.global_pcd.points) < 100:
+            return
+        # Placeholder for CAD feature extraction
+        rospy.logdebug("CAD feature extraction not implemented")
