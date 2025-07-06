@@ -172,6 +172,7 @@ catkin_install_python(PROGRAMS
   src/core/point_cloud_processor.py
   scripts/test_collision_checker.py
   scripts/sample_roi_poses.py
+  src/core/error_codes.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -22,6 +22,7 @@ from tf.transformations import (
 from copy import deepcopy
 import rviz_tools_py as viz
 import ros_numpy
+from moveit_commander import PlanningSceneInterface
 
 
 def resolve_package_path(pkg_uri: str) -> str:
@@ -212,12 +213,9 @@ def generate_camera_trajectory(
     return trajectory
 
 
-def get_roi_info(env):
+def get_roi_info():
     """
     Get comprehensive information about the robot_roi from the planning scene.
-
-    Args:
-        env: Environment loader instance with scene attribute
 
     Returns:
         dict: Dictionary containing:
@@ -226,13 +224,14 @@ def get_roi_info(env):
             - bounds: Dictionary with x_min, x_max, y_min, y_max, z_min, z_max
         None: If robot_roi not found or not a box primitive
     """
+
     rospy.loginfo("Retrieving robot_roi information from planning scene...")
 
-    # Wait a bit for the scene to be fully loaded
-    rospy.sleep(1.0)
+    # Create planning scene interface
+    scene = PlanningSceneInterface()
 
     # Get all collision objects from the scene
-    scene_objects = env.scene.get_objects()
+    scene_objects = scene.get_objects()
 
     # Check if robot_roi exists
     if "robot_roi" not in scene_objects:
@@ -274,12 +273,12 @@ def get_roi_info(env):
     return roi_info
 
 
-def get_robot_roi_bounds(env):
+def get_robot_roi_bounds():
     """
     Get the X,Y bounds of the robot_roi from the planning scene.
     A simplified version of get_roi_info() that returns only X,Y bounds.
     """
-    roi_info = get_roi_info(env)
+    roi_info = get_roi_info()
     if roi_info is None:
         return None
 
@@ -492,6 +491,8 @@ def visualize_waypoints(
                 pose, parent_frame, f"waypoint_{i}", tf_broadcaster
             )
 
+        rospy.sleep(0.001)
+
 
 def visualize_path_points(points, markers, color="white", size=0.01, show_labels=True):
     """Visualize a list of points as spheres with optional labels.
@@ -609,3 +610,56 @@ def add_text_annotation(
     text_pose.orientation.w = 1.0
     scale = Vector3(0.05, 0.05, 0.05)
     markers.publishText(text_pose, text, color, scale, 0)
+
+
+def sample_roi_poses(
+    num_samples: int,
+    max_vert_angle: float = 0.0,
+    max_horz_angle: float = 0.0,
+):
+    """
+    Sample random poses within ROI bounds with camera looking down.
+
+    Args:
+        num_samples: Number of poses to generate
+        max_vert_angle: Maximum vertical deviation from Z-down (degrees)
+        max_horz_angle: Maximum horizontal rotation (degrees)
+
+    Returns:
+        List of geometry_msgs/Pose objects
+    """
+    roi_info = get_roi_info()
+    roi_bounds = roi_info["bounds"]
+    poses = []
+
+    # Sample random positions
+    positions = np.random.uniform(
+        [roi_bounds["x_min"], roi_bounds["y_min"], roi_bounds["z_min"]],
+        [roi_bounds["x_max"], roi_bounds["y_max"], roi_bounds["z_max"]],
+        (num_samples, 3),
+    )
+
+    # Sample random orientations
+    vert_angles = (
+        np.random.uniform(-max_vert_angle, max_vert_angle, num_samples) * np.pi / 180
+    )
+    horz_angles = (
+        np.random.uniform(-max_horz_angle, max_horz_angle, num_samples) * np.pi / 180
+    )
+    for i in range(num_samples):
+        pose = Pose()
+        pose.position.x = positions[i, 0]
+        pose.position.y = positions[i, 1]
+        pose.position.z = positions[i, 2]
+
+        tool_rotation = euler_matrix(np.pi + vert_angles[i], 0, horz_angles[i])
+        q = quaternion_from_matrix(tool_rotation)
+
+        pose.orientation.x = q[0]
+        pose.orientation.y = q[1]
+        pose.orientation.z = q[2]
+        pose.orientation.w = q[3]
+
+        poses.append(pose)
+
+    return poses

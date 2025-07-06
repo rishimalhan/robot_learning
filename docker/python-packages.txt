@@ -27,3 +27,4 @@ bitsandbytes
 peft
 nltk
 bert_score
+rosnumpy

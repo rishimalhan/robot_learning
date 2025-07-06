@@ -4,6 +4,32 @@ import rospy
 from core.load_system import EnvironmentLoader
 from core.executor import Executor
 from neural_engine.srv import GenerateViewpoints, GenerateViewpointsRequest
+from core.utils import (
+    init_visualization,
+    visualize_waypoints,
+    clear_visualization,
+)
+
+
+def visualize_viewpoints(viewpoints, markers, tf_broadcaster):
+    """Visualize generated viewpoints"""
+    if not viewpoints:
+        rospy.logwarn("No viewpoints to visualize")
+        return
+
+    # Clear previous visualization
+    clear_visualization(markers)
+
+    # Visualize viewpoints
+    visualize_waypoints(
+        viewpoints,
+        markers,
+        tf_broadcaster,
+        show_labels=True,
+        show_axes=True,
+    )
+
+    rospy.loginfo(f"Visualized {len(viewpoints)} viewpoints")
 
 
 def main():
@@ -13,7 +39,7 @@ def main():
     # Initialize environment and executor
     env = EnvironmentLoader()
     executor = Executor()
-
+    markers, tf_broadcaster = init_visualization()
     try:
         # Move to home position
         rospy.loginfo("Moving to home position...")
@@ -39,20 +65,14 @@ def main():
         request = GenerateViewpointsRequest()
         request.vert_angle = 30.0  # 30 degrees vertical tilt
         request.horz_angle = 45.0  # 45 degrees horizontal rotation
-        request.num_samples = 12  # Generate 12 viewpoints
+        request.num_samples = 100  # Generate 1000 viewpoints
 
         response = generate_viewpoints(request)
+        visualize_viewpoints(response.viewpoints, markers, tf_broadcaster)
 
         if response.success:
             rospy.loginfo(f"{response.message}")
             rospy.loginfo(f"Generated {len(response.viewpoints)} viewpoints")
-
-            # Print first few viewpoints
-            for i, viewpoint in enumerate(response.viewpoints[:3]):
-                pos = viewpoint.position
-                rospy.loginfo(
-                    f"Viewpoint {i+1}: x={pos.x:.2f}, y={pos.y:.2f}, z={pos.z:.2f}"
-                )
         else:
             rospy.logerr(f"Service failed: {response.message}")
 

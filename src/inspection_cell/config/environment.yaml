@@ -51,9 +51,9 @@ ceiling_wall:
 # Inspection robot
 robot_roi:
   type: box
-  dimensions: [1.0, 1.8, 0.3]
+  dimensions: [1.0, 1.1, 0.3]
   pose:
-    position: [1.0, 0.0, 1.0]
+    position: [1.0, -0.1, 1.0]
     orientation: [0.0, 0.0, 0.0]
   color: [0.0, 1.0, 0.0]
   alpha: 0.2
