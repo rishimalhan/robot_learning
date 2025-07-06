@@ -12,11 +12,30 @@ from neural_engine.srv import (
 # Internal
 
 from core.utils import sample_roi_poses
+from moveit_commander import MoveGroupCommander, RobotCommander
 
 
 class SetCover:
     def __init__(self):
-        pass
+        self.move_group = MoveGroupCommander("manipulator")
+        self.robot = RobotCommander()
+
+    def filter_valid_viewpoints(self, viewpoints, min_visible_points=100):
+        """Filter viewpoints by IK feasibility and visibility"""
+        valid_viewpoints = []
+
+        for i, pose in enumerate(viewpoints):
+            # Check IK feasibility only
+            joint_values = self.move_group.get_ik(pose)
+
+            if joint_values:
+                valid_viewpoints.append(pose)
+                rospy.loginfo(f"Viewpoint {i+1}/{len(viewpoints)} has valid IK")
+
+        rospy.loginfo(
+            f"Filtered {len(valid_viewpoints)}/{len(viewpoints)} valid viewpoints"
+        )
+        return valid_viewpoints
 
     def handle_service_request(self, req):
         """Handle service request with custom parameters"""
@@ -37,10 +56,13 @@ class SetCover:
                 max_horz_angle=max_horz_angle,
             )
 
+            # Filter valid viewpoints
+            valid_viewpoints = self.filter_valid_viewpoints(viewpoints)
+
             response = GenerateViewpointsResponse()
             response.success = True
-            response.message = f"Generated {len(viewpoints)} viewpoints successfully"
-            response.viewpoints = viewpoints
+            response.message = f"Generated {len(valid_viewpoints)} valid viewpoints (from {len(viewpoints)} candidates)"
+            response.viewpoints = valid_viewpoints
 
             return response
 
