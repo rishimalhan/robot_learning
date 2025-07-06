@@ -7,3 +7,4 @@ int32 num_samples       # Number of random samples to generate
 bool success            # True if viewpoints were generated successfully
 string message          # Status message
 geometry_msgs/Pose[] viewpoints  # Generated viewpoints 
+sensor_msgs/PointCloud2[] pointclouds  # Generated pointclouds

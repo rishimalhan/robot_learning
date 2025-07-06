@@ -56,16 +56,13 @@ def load_yaml_to_params(file_path: str, param_namespace: str) -> Dict:
     # Resolve package paths if needed
     if file_path.startswith("package://"):
         file_path = resolve_package_path(file_path)
-
     # Load YAML file
     with open(file_path, "r") as f:
         config = yaml.safe_load(f)
-
     # Add to parameter server
     for key, value in config.items():
         param_path = f"{param_namespace}/{key}"
         rospy.set_param(param_path, value)
-
     return config
 
 

@@ -1,5 +1,8 @@
 #! /usr/bin/env python3
 
+# External
+
+import os
 import torch
 import numpy as np
 import rospy
@@ -7,16 +10,15 @@ from dataclasses import dataclass
 from moveit_commander import PlanningSceneInterface
 import tf2_ros
 from sensor_msgs.msg import PointCloud2, PointField
-import std_msgs.msg
 import sensor_msgs.point_cloud2 as pc2
+import std_msgs.msg
 import time
 from tf.transformations import euler_matrix, euler_from_quaternion
-from typing import Any
+import rospkg
 
+# Internal
 
-def get_param(param_name: str, default: Any = None) -> Any:
-    """Get a parameter from the ROS parameter server."""
-    return rospy.get_param(param_name, default)
+from core.utils import load_yaml_to_params, get_param
 
 
 @dataclass
@@ -50,6 +52,9 @@ class SimulatedPerception:
         self.device = self._select_optimal_device()
         rospy.loginfo(f"Using device: {self.device}")
 
+        self.rospack = rospkg.RosPack()
+        self.initialize = False
+
         # Get configuration parameters
         self.camera_params = self._load_camera_parameters()
 
@@ -74,9 +79,9 @@ class SimulatedPerception:
 
         # Load mesh from planning scene
         self._load_mesh_from_scene()
-
-        # Pre-compute mesh data that doesn't change
-        self._precompute_mesh_data()
+        if self.initialize:
+            # Pre-compute mesh data that doesn't change
+            self._precompute_mesh_data()
 
         rospy.loginfo("SimulatedPerception initialized successfully")
 
@@ -91,10 +96,14 @@ class SimulatedPerception:
 
     def _load_camera_parameters(self):
         """Load camera parameters from ROS parameter server."""
-        camera_frame = get_param("/perception/camera/frame", "tool0")
-
-        # Load constraint parameters
-        constraints = get_param("/perception/camera/constraints")
+        config_path = os.path.join(
+            self.rospack.get_path("neural_engine"),
+            "config",
+            "perception.yaml",
+        )
+        self.config = load_yaml_to_params(config_path, "/perception")
+        camera_frame = self.config.get("camera").get("frame")
+        constraints = self.config.get("camera").get("constraints")
         max_normal_angle = constraints.get("max_normal_angle")
 
         vertical_distance = constraints.get("vertical_distance")
@@ -105,7 +114,7 @@ class SimulatedPerception:
         max_horizontal_distance = horizontal_distance.get("max")
 
         # Load sensing parameters
-        sensing = get_param("/perception/camera/sensing")
+        sensing = self.config.get("camera").get("sensing")
         noise_config = sensing.get("noise")
 
         # Get noise parameters with defaults
@@ -150,7 +159,8 @@ class SimulatedPerception:
         scene_objects = scene.get_objects()
         if not scene_objects:
             rospy.logerr("No objects found in planning scene")
-            raise ValueError("No objects found in planning scene")
+            self.initialize = False
+            return
 
         rospy.loginfo(f"Found objects in scene: {list(scene_objects.keys())}")
 
@@ -158,9 +168,8 @@ class SimulatedPerception:
         obj = scene_objects.get(object_name)
         if not obj:
             rospy.logerr(f"Required object '{object_name}' not found")
-            raise ValueError(
-                f"Required object '{object_name}' not found. Available: {', '.join(scene_objects.keys())}"
-            )
+            self.initialize = False
+            return
 
         # Validate mesh data exists
         if not getattr(obj, "meshes", None):
@@ -235,6 +244,7 @@ class SimulatedPerception:
         rospy.loginfo(f"Using all {len(faces)} faces for geometric filtering")
 
         rospy.loginfo("Mesh loaded successfully")
+        self.initialize = True
 
     def _precompute_mesh_data(self):
         """Pre-compute mesh data that doesn't change between frames."""
@@ -329,6 +339,17 @@ class SimulatedPerception:
             return transform_matrix
 
     def generate_pointcloud(self):
+        """
+        Generate point cloud directly from mesh vertices through camera projection.
+        Returns:
+            np.ndarray: Point cloud in world coordinates
+            None: If no point cloud is generated
+        """
+
+        if not self.initialize:
+            self._load_mesh_from_scene()
+            self._precompute_mesh_data()
+
         """Generate point cloud directly from mesh vertices through camera projection."""
         if self.mesh_vertices is None or self.mesh_faces is None:
             rospy.logwarn_throttle(
@@ -517,39 +538,45 @@ class SimulatedPerception:
             rospy.logdebug_throttle(
                 1.0, f"Point cloud generation took {elapsed:.3f} seconds"
             )
-
+            if pointcloud is None or pointcloud.shape[0] < 10:
+                return None
             return pointcloud
+
+    def _to_pointcloud_msg(self, pointcloud):
+        """Convert point cloud to ROS point cloud message."""
+        # Create point cloud message
+        fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+
+        # Create message with world frame
+        cloud_msg = pc2.create_cloud(
+            std_msgs.msg.Header(frame_id="world", stamp=rospy.Time.now()),
+            fields,
+            pointcloud,
+        )
+        return cloud_msg
 
     def publish_pointcloud(self):
         """Generate and publish the point cloud."""
         try:
             # Generate point cloud
             pointcloud = self.generate_pointcloud()
-
-            if pointcloud is None or len(pointcloud) == 0:
-                return
-
-            # Create point cloud message
-            fields = [
-                PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-                PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-                PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            ]
-
-            # Create message with world frame
-            cloud_msg = pc2.create_cloud(
-                std_msgs.msg.Header(frame_id="world", stamp=rospy.Time.now()),
-                fields,
-                pointcloud,
-            )
-
+            if pointcloud is None:
+                return None
+            length_points = pointcloud.shape[0]
+            cloud_msg = self._to_pointcloud_msg(pointcloud)
             # Publish message
             self.pointcloud_pub.publish(cloud_msg)
 
             # Log with throttling
             rospy.logdebug_throttle(
-                1.0, f"Published point cloud with {len(pointcloud)} points"
+                1.0, f"Published point cloud with {length_points} points"
             )
+
+            return cloud_msg
 
         except Exception as e:
             rospy.logerr(f"Error publishing point cloud: {e}")

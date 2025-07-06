@@ -53,7 +53,7 @@ def main():
 
         # Wait for SetCover service
         rospy.loginfo("Waiting for SetCover service...")
-        rospy.wait_for_service("generate_viewpoints", timeout=10.0)
+        rospy.wait_for_service("generate_viewpoints", timeout=30.0)
 
         # Create service proxy
         generate_viewpoints = rospy.ServiceProxy(
@@ -65,7 +65,7 @@ def main():
         request = GenerateViewpointsRequest()
         request.vert_angle = 30.0  # 30 degrees vertical tilt
         request.horz_angle = 45.0  # 45 degrees horizontal rotation
-        request.num_samples = 100  # Generate 1000 viewpoints
+        request.num_samples = 10  # Generate 1000 viewpoints
 
         response = generate_viewpoints(request)
         visualize_viewpoints(response.viewpoints, markers, tf_broadcaster)

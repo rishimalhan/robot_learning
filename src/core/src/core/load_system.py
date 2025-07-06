@@ -2,6 +2,7 @@
 
 # External
 
+import threading
 import rospy
 import os
 from tf.transformations import quaternion_from_euler
@@ -75,6 +76,8 @@ class EnvironmentLoader:
 
         # Initialize TCP transform cache
         self.tcp_transform = np.eye(4)
+        # Initialize static transform broadcaster (keep as instance variable)
+        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster()
 
         # Clear scene if requested
         if clear_scene:
@@ -311,9 +314,6 @@ class EnvironmentLoader:
         # Cache the TCP transform
         self.tcp_transform = ros_numpy.numpify(tcp_pose)
 
-        # Create static transform broadcaster
-        static_broadcaster = tf2_ros.StaticTransformBroadcaster()
-
         # Create transform message
         transform = geometry_msgs.msg.TransformStamped()
         transform.header.stamp = rospy.Time.now()
@@ -331,8 +331,8 @@ class EnvironmentLoader:
         transform.transform.rotation.z = q[2]
         transform.transform.rotation.w = q[3]
 
-        # Send the transform
-        static_broadcaster.sendTransform(transform)
+        # Send the transform using the instance broadcaster
+        self.static_broadcaster.sendTransform(transform)
         rospy.loginfo(
             f"Set TCP pose relative to {eef_link} in MoveIt and published to TF tree"
         )

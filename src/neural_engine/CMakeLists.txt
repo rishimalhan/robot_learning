@@ -15,6 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   std_msgs
   geometry_msgs
+  sensor_msgs
   message_generation
   core
 )
@@ -77,6 +78,7 @@ generate_messages(
   DEPENDENCIES
   std_msgs
   geometry_msgs
+  sensor_msgs
 )
 
 ################################################
@@ -111,7 +113,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES neural_engine
-  CATKIN_DEPENDS rospy std_msgs geometry_msgs message_runtime core
+  CATKIN_DEPENDS rospy std_msgs geometry_msgs message_runtime core sensor_msgs
 #  DEPENDS system_lib
 )
 

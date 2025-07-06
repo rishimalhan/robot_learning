@@ -134,8 +134,8 @@ tool:
   collision_enabled: true
   tcp:
     pose:
-      position: [0.0, 0.0, 0.1]
-      orientation: [0.0, 0.0, 1.57]
+      position: [0.0, 0.0, 0.05]
+      orientation: [0.0, 0.0, 3.14]
 
   # type: mesh
   # mesh_path: "package://inspection_cell/assets/welding_tool.stl"
