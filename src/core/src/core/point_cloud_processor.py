@@ -55,14 +55,16 @@ class PointCloudProcessor:
 
         # Publishers
         self.reconstruction_pub = rospy.Publisher(
-            "reconstruction", PointCloud2, queue_size=1
+            "reconstruction", PointCloud2, queue_size=1, latch=True
         )
         if enable_mesh:
             self.mesh_pub = rospy.Publisher(
-                "reconstructed_mesh", MarkerArray, queue_size=1
+                "reconstructed_mesh", MarkerArray, queue_size=1, latch=True
             )
         if enable_cad:
-            self.cad_pub = rospy.Publisher("cad_features", MarkerArray, queue_size=1)
+            self.cad_pub = rospy.Publisher(
+                "cad_features", MarkerArray, queue_size=1, latch=True
+            )
 
         # Subscriber
         self.pointcloud_sub = rospy.Subscriber(

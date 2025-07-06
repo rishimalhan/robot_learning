@@ -173,6 +173,7 @@ catkin_install_python(PROGRAMS
   scripts/test_collision_checker.py
   scripts/sample_roi_poses.py
   src/core/error_codes.py
+  src/core/greedy_set_cover.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

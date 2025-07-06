@@ -171,7 +171,7 @@ catkin_install_python(PROGRAMS
   src/neural_engine/simulated_perception.py
   src/neural_engine/inference_engine.py
   src/neural_engine/common.py
-  src/neural_engine/set_cover.py
+  src/neural_engine/viewpoint_generator.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

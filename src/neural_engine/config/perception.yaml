@@ -5,7 +5,7 @@ mesh:
 # Camera configuration
 camera:
   # Camera frame
-  frame: "tool0"  # Camera frame in TF tree
+  frame: "tcp"  # Camera frame in TF tree
   
   # Geometric constraint settings
   constraints:

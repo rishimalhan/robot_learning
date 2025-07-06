@@ -22,13 +22,12 @@ from core.utils import sample_roi_poses
 from neural_engine.simulated_perception import SimulatedPerception
 
 # Constants
-MIN_POINTCLOUD_THRESHOLD = 100  # Minimum number of points required in pointcloud
 EVALUATION_CAMERA_FRAME = (
     "evaluation_camera"  # Dedicated frame for viewpoint evaluation
 )
 
 
-class SetCover:
+class ViewpointGenerator:
     def __init__(self):
         self._initialize = False
         self.timeout = 10.0
@@ -118,7 +117,7 @@ class SetCover:
             np.matmul(ros_numpy.numpify(pose), np.linalg.inv(self._tcp_transform))
         )
 
-    def filter_valid_viewpoints(self, viewpoints, num_samples):
+    def filter_valid_viewpoints(self, viewpoints):
         """
         Filter viewpoints by IK feasibility and pointcloud visibility
         """
@@ -144,8 +143,6 @@ class SetCover:
                     if pointcloud is not None:
                         valid_viewpoints.append(pose)
                         valid_pointclouds.append(pointcloud)
-                        if len(valid_viewpoints) == num_samples:
-                            break
 
             except Exception as e:
                 rospy.logwarn(f"Viewpoint validation failed for viewpoint {i+1}: {e}")
@@ -169,14 +166,14 @@ class SetCover:
 
             # Generate candidate viewpoints
             candidate_poses = sample_roi_poses(
-                request.num_samples * 5,  # Generate more candidates for filtering
+                request.num_samples,  # Generate more candidates for filtering
                 request.vert_angle,
                 request.horz_angle,
             )
 
             # Filter by IK feasibility and pointcloud visibility
             valid_viewpoints, valid_pointclouds = self.filter_valid_viewpoints(
-                candidate_poses, num_samples=request.num_samples
+                candidate_poses
             )
 
             response = GenerateViewpointsResponse()
@@ -215,19 +212,21 @@ class SetCover:
 
 def main():
     rospy.init_node("set_cover_service")
-    set_cover = SetCover()
+    viewpoint_generator = ViewpointGenerator()
 
     rospy.Service(
-        "generate_viewpoints", GenerateViewpoints, set_cover.generate_viewpoints
+        "generate_viewpoints",
+        GenerateViewpoints,
+        viewpoint_generator.generate_viewpoints,
     )
-    rospy.loginfo("SetCover service ready")
+    rospy.loginfo("ViewpointGenerator service ready")
 
     try:
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
     finally:
-        set_cover.cleanup()
+        viewpoint_generator.cleanup()
 
 
 if __name__ == "__main__":

@@ -455,11 +455,12 @@ def visualize_waypoints(
     markers,
     tf_broadcaster=None,
     parent_frame="world",
-    show_labels=True,
+    show_labels=False,
     show_axes=True,
     show_tf=False,
+    path=False,
 ):
-    """Visualize a list of waypoints with optional labels and transforms.
+    """Visualize a list of waypoints with optional labels, transforms, and connecting path.
 
     Args:
         waypoints: List of geometry_msgs/Pose waypoints
@@ -469,6 +470,7 @@ def visualize_waypoints(
         show_labels: Whether to show waypoint labels
         show_axes: Whether to show axis markers
         show_tf: Whether to publish TF frames
+        path: Whether to draw lines connecting consecutive waypoints
     """
     for i, pose in enumerate(waypoints):
         if show_axes:
@@ -489,6 +491,21 @@ def visualize_waypoints(
             )
 
         rospy.sleep(0.001)
+
+    # Draw path lines between consecutive waypoints
+    if path and len(waypoints) > 1:
+        path_points = []
+        for pose in waypoints:
+            point = Point()
+            point.x = pose.position.x
+            point.y = pose.position.y
+            point.z = pose.position.z
+            path_points.append(point)
+
+        # Publish line strip connecting all waypoints
+        markers.publishPath(
+            path_points, "blue", 0.005, 0
+        )  # 0.005m line width, lifetime=0
 
 
 def visualize_path_points(points, markers, color="white", size=0.01, show_labels=True):

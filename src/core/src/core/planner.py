@@ -285,6 +285,17 @@ class Planner:
             rospy.loginfo(f"Available targets: {self.move_group.get_named_targets()}")
             return False, None, 0, 0
 
+        # Check if already at target position
+        current_joints = np.array(
+            self.move_group.get_current_joint_values(), dtype=float
+        )
+        self.move_group.set_named_target(target_name)
+        target_joints = np.array(self.move_group.get_joint_value_target(), dtype=float)
+
+        if np.allclose(current_joints, target_joints, atol=1e-4):
+            rospy.loginfo(f"Already at target: {target_name}")
+            return True, None, 0, 0
+
         rospy.loginfo(f"Planning to named target: {target_name}")
 
         def planning_func():

@@ -15,5 +15,9 @@
     <!-- Pass parameters to the node -->
     <param name="/perception/camera/sensing/frame_rate" value="$(arg rate_hz)"/>
   </node>
+
+  <node name="viewpoint_generator" pkg="neural_engine" type="viewpoint_generator.py"
+        output="screen" respawn="false" required="true">
+  </node>
   
 </launch>

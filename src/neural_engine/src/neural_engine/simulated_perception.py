@@ -8,12 +8,12 @@ import numpy as np
 import rospy
 from dataclasses import dataclass
 from moveit_commander import PlanningSceneInterface
-import tf2_ros
+import tf2_ros, tf
 from sensor_msgs.msg import PointCloud2, PointField
 import sensor_msgs.point_cloud2 as pc2
 import std_msgs.msg
 import time
-from tf.transformations import euler_matrix, euler_from_quaternion
+from tf.transformations import euler_matrix, euler_from_quaternion, quaternion_matrix
 import rospkg
 
 # Internal
@@ -69,8 +69,7 @@ class SimulatedPerception:
         self.face_normals_flipped = False
 
         # Set up TF listener for camera transforms
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        self.tf_listener = tf.TransformListener()
 
         # Set up point cloud publisher
         self.pointcloud_pub = rospy.Publisher(
@@ -306,25 +305,16 @@ class SimulatedPerception:
         """Get the camera transform from TF."""
         try:
             # Look up the transform from world to camera frame
-            transform = self.tf_buffer.lookup_transform(
-                "world", self.camera_params.frame_id, rospy.Time(0), rospy.Duration(0.1)
+            self.tf_listener.waitForTransform(
+                "world", self.camera_params.frame_id, rospy.Time(0), rospy.Duration(1.0)
             )
-
-            # Extract translation and rotation
-            trans = transform.transform.translation
-            rot = transform.transform.rotation
-
+            (trans, rot) = self.tf_listener.lookupTransform(
+                "world", self.camera_params.frame_id, rospy.Time(0)
+            )
             # Create transform matrix
-            transform_matrix = np.eye(4, dtype=np.float32)
-            transform_matrix[:3, :3] = np.array(
-                euler_matrix(*euler_from_quaternion([rot.x, rot.y, rot.z, rot.w]))[
-                    :3, :3
-                ],
-                dtype=np.float32,
-            )
-            transform_matrix[:3, 3] = [trans.x, trans.y, trans.z]
-
-            return transform_matrix
+            T = quaternion_matrix(rot)
+            T[:3, 3] = trans
+            return T
 
         except (
             tf2_ros.LookupException,
