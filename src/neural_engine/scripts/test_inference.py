@@ -19,7 +19,7 @@ logging.info("Loading tokenizer...")
 tokenizer = load_tokenizer()
 
 # Boolean flag to switch between original and fine-tuned model
-use_fine_tuned_model = True
+use_fine_tuned_model = False
 
 # Load model
 logging.info(f"Loading {'fine-tuned' if use_fine_tuned_model else 'original'} model...")

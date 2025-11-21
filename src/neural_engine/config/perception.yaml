@@ -1,36 +1,26 @@
 # Mesh configuration
-mesh:
-  scene_object_name: "part"  # Name of the object in MoveIt planning scene
+sensor:
+  frame: "tcp"
+  scene_xml: "package://neural_engine/config/inspection_sensor_scene.xml"
 
-# Camera configuration
-camera:
-  # Camera frame
-  frame: "tcp"  # Camera frame in TF tree
-  
-  # Geometric constraint settings
+  intrinsics:
+    width: 1024
+    height: 1024
+    fx: 886.81
+    fy: 886.81
+    cx: 512.0
+    cy: 512.0
+
+  floor:
+    height: 0.0
+    margin: 0.02
+
   constraints:
-    # Maximum angle between triangle normal and camera view direction (degrees)
-    # Triangles with normals beyond this angle from the camera direction will be filtered out
-    max_normal_angle: 20.0
-    
-    # Vertical distance constraints (along camera Z axis, in meters)
-    vertical_distance:
-      min: 0.1
-      max: 0.4
-    # Horizontal distance constraints (perpendicular to camera Z axis, in meters)
-    # Maximum radial distance from camera optical axis
-    horizontal_distance:
-      max: 0.15
-  
-  # Sensing settings
-  sensing:
-    frame_rate: 10  # Publication rate in Hz (increased from 1 to 10)
-    
-    # Noise settings
-    noise:
-      # Base noise levels (standard deviation in meters, range 0-1)
-      horizontal: 0.0  # Noise in X-Y plane (perpendicular to camera axis)
-      vertical: 0.0    # Noise in Z direction (along camera axis)
-      
-      # Distance-based noise scaling (noise increases with distance)
-      distance_factor: 0.0  # How much to scale noise based on distance (0 = no scaling)
+    depth:
+      min: 0.2
+      max: 0.8
+    radius: 0.25
+    orientation: 0.8
+
+  dynamics:
+    frame_rate: 10

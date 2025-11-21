@@ -43,36 +43,25 @@ class ViewpointGenerator:
         self._ik_srv = rospy.ServiceProxy("/compute_ik", GetPositionIK)
 
         # Setup simulated perception for pointcloud generation
-        self._perception = SimulatedPerception()
-
+        self._perception = SimulatedPerception(camera_frame=EVALUATION_CAMERA_FRAME)
         # Setup TF broadcaster for publishing evaluation camera poses
         self._tf_broadcaster = tf2_ros.StaticTransformBroadcaster()
-        import collections
-        import collections.abc
-
-        collections.Sequence = collections.abc.Sequence
+        # Get TCP transform for IK frame conversion
         listener = tf.TransformListener()
         (trans, rot) = listener.lookupTransform("tool0", "tcp", rospy.Time(0))
         T = quaternion_matrix(rot)
         T[:3, 3] = trans
-
         self._tcp_transform = T
-
-        # Store original camera frame to restore later
-        self._original_camera_frame = self._perception.camera_params.frame_id
-
-        # Temporarily override the camera frame for evaluation
-        self._perception.camera_params.frame_id = EVALUATION_CAMERA_FRAME
-
         self._initialize = True
 
     def _publish_evaluation_camera_transform(self, pose):
         """
-        Publish a camera transform to the dedicated evaluation frame
+        Publish a camera transform to the dedicated evaluation frame.
+        Returns the timestamp of the published transform.
         """
-
         transform = TransformStamped()
-        transform.header.stamp = rospy.Time.now()
+        transform_timestamp = rospy.Time.now()
+        transform.header.stamp = transform_timestamp
         transform.header.frame_id = "world"
         transform.child_frame_id = EVALUATION_CAMERA_FRAME
 
@@ -82,22 +71,30 @@ class ViewpointGenerator:
         transform.transform.rotation = pose.orientation
 
         self._tf_broadcaster.sendTransform(transform)
-        rospy.sleep(0.1)  # Allow transform to propagate
+        return transform_timestamp
 
     def _generate_pointcloud_from_pose(self, pose):
         """
-        Generate pointcloud from a specific camera pose without affecting real robot
+        Generate pointcloud from a specific camera pose without affecting real robot.
+        Verifies pointcloud timestamp is >= transform timestamp (stamp-1).
         """
-
         try:
-            # Publish to dedicated evaluation frame (not the real robot frame)
-            self._publish_evaluation_camera_transform(pose)
+            # Publish to dedicated evaluation frame and get transform timestamp (stamp-1)
+            transform_timestamp = self._publish_evaluation_camera_transform(pose)
+            # Generate pointcloud from this viewpoint (uses latest transform)
+            pointcloud = self._perception.trigger(publish=True)
 
-            # Generate pointcloud from this viewpoint
-            pointcloud = self._perception.generate_pointcloud()
             if pointcloud is None:
                 return None
-            pointcloud = self._perception._to_pointcloud_msg(pointcloud)
+
+            # Verify pointcloud timestamp is >= transform timestamp (stamp-1)
+            if pointcloud.header.stamp < transform_timestamp:
+                rospy.logwarn(
+                    f"Pointcloud timestamp {pointcloud.header.stamp} < transform timestamp {transform_timestamp}. "
+                    "Rejecting pointcloud."
+                )
+                return None
+
             return pointcloud
 
         except Exception as e:
@@ -105,12 +102,7 @@ class ViewpointGenerator:
             return None
 
     def _ik_frame_transform(self, pose):
-        # ToDo: Make a generic environment class that constructs
-        # itself from the moveit scene and provides the necessary transforms
-        """
-        Transform pose from world to TCP frame
-        """
-        # Convert to Pose if PoseStamped
+        """Transform pose from world to TCP frame."""
         if isinstance(pose, PoseStamped):
             pose = pose.pose
         return ros_numpy.geometry.numpy_to_pose(
@@ -118,10 +110,7 @@ class ViewpointGenerator:
         )
 
     def filter_valid_viewpoints(self, viewpoints):
-        """
-        Filter viewpoints by IK feasibility and pointcloud visibility
-        """
-
+        """Filter viewpoints by IK feasibility and pointcloud visibility."""
         valid_viewpoints = []
         valid_pointclouds = []
         random.shuffle(viewpoints)
@@ -143,6 +132,7 @@ class ViewpointGenerator:
                     if pointcloud is not None:
                         valid_viewpoints.append(pose)
                         valid_pointclouds.append(pointcloud)
+                        from IPython import embed; embed()
 
             except Exception as e:
                 rospy.logwarn(f"Viewpoint validation failed for viewpoint {i+1}: {e}")
@@ -150,10 +140,7 @@ class ViewpointGenerator:
         return valid_viewpoints, valid_pointclouds
 
     def generate_viewpoints(self, request):
-        """
-        Generate viewpoints service callback
-        """
-
+        """Generate viewpoints service callback."""
         if not self._initialize:
             self.initialize()
 
@@ -162,11 +149,9 @@ class ViewpointGenerator:
                 f"Generating {request.num_samples} viewpoints with "
                 f"vert_angle={request.vert_angle}, horz_angle={request.horz_angle}"
             )
-            rospy.loginfo(f"Using evaluation camera frame: {EVALUATION_CAMERA_FRAME}")
-
             # Generate candidate viewpoints
             candidate_poses = sample_roi_poses(
-                request.num_samples,  # Generate more candidates for filtering
+                request.num_samples,
                 request.vert_angle,
                 request.horz_angle,
             )
@@ -198,17 +183,6 @@ class ViewpointGenerator:
             response.message = f"Error: {str(e)}"
             return response
 
-    def cleanup(self):
-        """
-        Restore original camera frame and cleanup
-        """
-
-        if self._original_camera_frame is not None:
-            self._perception.camera_params.frame_id = self._original_camera_frame
-            rospy.loginfo(
-                f"Restored original camera frame: {self._original_camera_frame}"
-            )
-
 
 def main():
     rospy.init_node("set_cover_service")
@@ -225,9 +199,6 @@ def main():
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
-    finally:
-        viewpoint_generator.cleanup()
-
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,20 @@
+<mujoco model="inspection_sensor_scene">
+    <option timestep="0.01" gravity="0 0 -9.81"/>
+    <visual>
+        <global offwidth="{width}" offheight="{height}"/>
+        <map znear="0.01" zfar="5.0"/>
+    </visual>
+    <asset>
+        <material name="workpiece_mat" rgba="0.8 0.2 0.2 1"/>
+        <mesh name="workpiece_mesh" file="{mesh_file}" scale="{scale_x} {scale_y} {scale_z}"/>
+    </asset>
+    <worldbody>
+        <body name="sensor_head" mocap="true">
+            <camera name="inspection_sensor" pos="0 0 0" quat="1 0 0 0" fovy="{fovy}" resolution="{width} {height}"/>
+        </body>
+        <body name="workpiece" pos="{pos_x} {pos_y} {pos_z}" quat="{quat_w} {quat_x} {quat_y} {quat_z}">
+            <geom name="workpiece_geom" type="mesh" mesh="workpiece_mesh" material="workpiece_mat"/>
+        </body>
+        <light name="key_light" pos="0 0 2.5" dir="0 0 -1" diffuse="1 1 1"/>
+    </worldbody>
+</mujoco>
