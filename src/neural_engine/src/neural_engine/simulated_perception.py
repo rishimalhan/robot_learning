@@ -35,7 +35,7 @@ class SimulatedPerception:
         PointField("b", 20, PointField.FLOAT32, 1),
     ]
 
-    def __init__(self, camera_frame=None):
+    def __init__(self, camera_frame=None, manual_camera_transform=None):
         package_root = rospkg.RosPack().get_path("neural_engine")
         config_path = os.path.join(package_root, "config", "perception.yaml")
         with open(config_path, "r") as cfg:
@@ -47,8 +47,6 @@ class SimulatedPerception:
 
         sensor_cfg = config["sensor"]
         intr = sensor_cfg["intrinsics"]
-
-        self.camera_frame = camera_frame if camera_frame else sensor_cfg.get("frame")
         self.frame_rate = sensor_cfg["dynamics"]["frame_rate"]
         self.width = intr["width"]
         self.height = intr["height"]
@@ -64,8 +62,6 @@ class SimulatedPerception:
         floor_cfg = sensor_cfg.get("floor", {})
         self.floor_height = floor_cfg.get("height", 0.0)
         self.floor_margin = floor_cfg.get("margin", 0.02)
-
-        self.tf_listener = tf.TransformListener()
         self.temp_dir = tempfile.mkdtemp(prefix="inspection_sim_")
         self.model = None
         self.data = None
@@ -73,6 +69,12 @@ class SimulatedPerception:
         self.mocap_id = None
         self._env_signature = None
         self._camera_transform_mujoco = None
+        self._manual_camera_transform = manual_camera_transform
+        self.camera_frame = camera_frame
+        self.tf_listener = None
+        if self._manual_camera_transform is None and self.camera_frame is None:
+            self.camera_frame = sensor_cfg.get("frame")
+            self.tf_listener = tf.TransformListener()
 
         self.pointcloud_pub = rospy.Publisher(
             "/camera/points", PointCloud2, queue_size=1
@@ -174,6 +176,8 @@ class SimulatedPerception:
 
     def get_camera_transform(self):
         """Get camera transform from TF (latest available)."""
+        if self._manual_camera_transform is not None:
+            return self._manual_camera_transform
         try:
             self.tf_listener.waitForTransform(
                 "world", self.camera_frame, rospy.Time(0), rospy.Duration(1.0)
@@ -190,7 +194,7 @@ class SimulatedPerception:
         except Exception:
             return None
 
-    def _update_camera_pose_from_tf(self):
+    def _update_camera_pose(self):
         T = self.get_camera_transform()
         if T is None:
             return False
@@ -216,7 +220,7 @@ class SimulatedPerception:
         return True
 
     def render_rgb_depth(self):
-        if not self._update_camera_pose_from_tf():
+        if not self._update_camera_pose():
             rospy.logwarn_throttle(
                 5.0,
                 f"Camera transform not available (world -> {self.camera_frame}), skipping.",
@@ -345,7 +349,7 @@ class SimulatedPerception:
         """
         rgb, depth = self.render_rgb_depth()
         if rgb is None or depth is None:
-                return None
+            return None
 
         points_ros, colors = self._unproject_depth(depth, rgb)
         if points_ros is None:
@@ -380,6 +384,16 @@ class SimulatedPerception:
             )
 
         return cloud_msg
+
+    def set_manual_camera_pose(self, position, orientation_xyzw):
+        """Set camera pose manually (bypass TF)."""
+        T = quaternion_matrix(orientation_xyzw)
+        T[:3, 3] = position
+        self._manual_camera_transform = T
+
+    def clear_manual_camera_pose(self):
+        """Revert to TF-based camera pose updates."""
+        self._manual_camera_transform = None
 
     def cleanup(self):
         try:

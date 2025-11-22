@@ -132,7 +132,9 @@ class ViewpointGenerator:
                     if pointcloud is not None:
                         valid_viewpoints.append(pose)
                         valid_pointclouds.append(pointcloud)
-                        from IPython import embed; embed()
+                        from IPython import embed
+
+                        embed()
 
             except Exception as e:
                 rospy.logwarn(f"Viewpoint validation failed for viewpoint {i+1}: {e}")
@@ -199,6 +201,7 @@ def main():
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
+
 
 if __name__ == "__main__":
     main()
