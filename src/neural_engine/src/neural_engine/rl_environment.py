@@ -170,7 +170,7 @@ class InspectionEnv(Env):
         sampled_pose: Optional[PoseTuple] = None
         for _ in range(self._max_sampling_attempts):
             position, orientation = sample_pose_within_roi(
-                self._roi_bounds, self._max_tilt
+                self._roi_bounds, self._max_tilt, shrink_scale=0.7
             )
             if pose_within_bounds(
                 position=position,
@@ -365,17 +365,19 @@ if __name__ == "__main__":
     import time
 
     rospy.init_node("inspection_env_sanity", disable_signals=False)
-    num_evals = 20
-    env = InspectionEnv(publish_pointcloud=False, visualize=True)
+    num_evals = 100
+    env = InspectionEnv(publish_pointcloud=False, visualize=False)
     start_time = time.time()
     obs, info = env.reset()
     print(f"Reset complete. Info: {info}\n")
     end_time = time.time()
     print(f"Time taken to reset: {end_time - start_time} seconds")
-    episodes = 1
+    episodes = 10
     start_time = time.time()
+    counts = 0
     for _ in range(episodes):
         for i in range(num_evals):
+            counts += 1
             mean = np.array([0.0, 0.0, 0.0, 0.0, 0.0]) # x, y, z, roll, pitch
             sigma = np.array([0.05, 0.05, 0.05, 0.1, 0.1])
             action = np.random.normal(mean, sigma)
@@ -387,7 +389,7 @@ if __name__ == "__main__":
                 break
     end_time = time.time()
     print(
-        f"Time taken to step {num_evals} times: {end_time - start_time} seconds. Avg: {(end_time - start_time) / num_evals} seconds."
+        f"Time taken to count {counts}: {end_time - start_time} seconds. Avg: {(end_time - start_time) / counts} seconds."
     )
 
     env.close()

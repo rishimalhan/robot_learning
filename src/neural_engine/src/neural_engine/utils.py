@@ -11,23 +11,30 @@ from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker
 
 
-# Functions
-
-
 def wrap_angles(angles):
     """Wrap Euler angles to [-pi, pi]."""
     angles = np.asarray(angles, dtype=np.float32)
     return ((angles + np.pi) % (2 * np.pi)) - np.pi
 
 
-def sample_pose_within_roi(roi_bounds, max_tilt, rng=None):
+def sample_pose_within_roi(roi_bounds, max_tilt, rng=None, shrink_scale=0.0):
     """Sample a position/orientation pair within ROI bounds and tilt cone."""
     rng = rng or np.random.default_rng()
+    x_min, x_max = roi_bounds["x_min"], roi_bounds["x_max"]
+    y_min, y_max = roi_bounds["y_min"], roi_bounds["y_max"]
+    z_min, z_max = roi_bounds["z_min"], roi_bounds["z_max"]
+    if shrink_scale > 0.0:
+        x_min = x_min + (x_max - x_min) * shrink_scale / 2.0
+        x_max = x_max - (x_max - x_min) * shrink_scale / 2.0
+        y_min = y_min + (y_max - y_min) * shrink_scale / 2.0
+        y_max = y_max - (y_max - y_min) * shrink_scale / 2.0
+        z_min = z_min + (z_max - z_min) * shrink_scale / 2.0
+        z_max = z_max - (z_max - z_min) * shrink_scale / 2.0
     position = np.array(
         [
-            rng.uniform(roi_bounds["x_min"], roi_bounds["x_max"]),
-            rng.uniform(roi_bounds["y_min"], roi_bounds["y_max"]),
-            rng.uniform(roi_bounds["z_min"], roi_bounds["z_max"]),
+            rng.uniform(x_min, x_max),
+            rng.uniform(y_min, y_max),
+            rng.uniform(z_min, z_max),
         ],
         dtype=np.float32,
     )
