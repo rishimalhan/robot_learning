@@ -60,12 +60,14 @@ class InspectionEnv(Env):
         camera_angle: float = 30.0,
         publish_pointcloud: bool = False,
         visualize: bool = False,
+        point_stride: int = 1,
     ) -> None:
         """
         Args:
             camera_angle: Maximum tilt (degrees) allowed from global -Z.
             publish_pointcloud: Whether simulated perception publishes ROS clouds.
             visualize: When True, emit RViz markers + debug clouds.
+            point_stride: Downsampling factor for depth unprojection (>=1).
         """
         super().__init__()
         self._perception = SimulatedPerception(manual_camera_transform=np.eye(4))
@@ -74,10 +76,12 @@ class InspectionEnv(Env):
         self._max_tilt = np.deg2rad(camera_angle)
         self._publish_pointcloud = publish_pointcloud
         self._visualize = visualize
+        self._point_stride = max(1, int(point_stride))
 
         self._last_render = None
         self._max_sampling_attempts = 25
         self._part_rotation = np.eye(3)
+        self._part_rotation_inv = np.eye(3)
         self._part_centroid = np.zeros(3)
         self._part_bounds = self._compute_part_bounds()
         self._roi_bounds = self._compute_roi_bounds()
@@ -129,6 +133,7 @@ class InspectionEnv(Env):
         transform[:3, 3] = position
         mesh.apply_transform(transform)
         self._part_rotation = transform[:3, :3]
+        self._part_rotation_inv = self._part_rotation.T
         self._part_centroid = np.array(mesh.centroid, dtype=np.float32)
         mins, maxs = mesh.bounds
         return {
@@ -187,9 +192,18 @@ class InspectionEnv(Env):
         if sampled_pose is None:
             raise RuntimeError("Failed to sample valid pose during reset.")
 
-        pointcloud = self._perception.trigger(publish=self._publish_pointcloud)
-        self._voxel_grid.integrate_pointcloud(pointcloud)
-        self._visualize_scene(cloud_msg=pointcloud)
+        trigger_result = self._perception.trigger(
+            publish=self._publish_pointcloud,
+            downsample=self._point_stride,
+        )
+        cloud_msg = None
+        if isinstance(trigger_result, tuple):
+            points_np, _ = trigger_result
+            self._voxel_grid.integrate_points(points_np)
+        else:
+            cloud_msg = trigger_result
+            self._voxel_grid.integrate_pointcloud(cloud_msg)
+        self._visualize_scene(cloud_msg=cloud_msg)
         self._ctx.prev_action = np.zeros_like(self._ctx.prev_action)
         state = self._build_state()
         surface_done = self._voxel_grid.is_surface_covered()
@@ -252,9 +266,18 @@ class InspectionEnv(Env):
         )
         self._ctx.prev_action = action.copy()
 
-        pointcloud = self._perception.trigger(publish=self._publish_pointcloud)
-        delta_cov = self._voxel_grid.integrate_pointcloud(pointcloud)
-        self._visualize_scene(pointcloud)
+        trigger_result = self._perception.trigger(
+            publish=self._publish_pointcloud,
+            downsample=self._point_stride,
+        )
+        cloud_msg = None
+        if isinstance(trigger_result, tuple):
+            points_np, _ = trigger_result
+            delta_cov = self._voxel_grid.integrate_points(points_np)
+        else:
+            cloud_msg = trigger_result
+            delta_cov = self._voxel_grid.integrate_pointcloud(cloud_msg)
+        self._visualize_scene(cloud_msg)
         state = self._build_state()
         total_cov = float(self._voxel_grid.coverage) or 1.0
         surface_done = self._voxel_grid.is_surface_covered()
@@ -319,10 +342,10 @@ class InspectionEnv(Env):
             return None
         pos_world = self._ctx.position
         rel_pos = pos_world - self._part_centroid
-        pos_local = self._part_rotation.T @ rel_pos
+        pos_local = self._part_rotation_inv @ rel_pos
 
         rot_world = euler_matrix(*self._ctx.orientation)[:3, :3]
-        rot_local = self._part_rotation.T @ rot_world
+        rot_local = self._part_rotation_inv @ rot_world
         rot_local_h = np.eye(4)
         rot_local_h[:3, :3] = rot_local
         euler_local = wrap_angles(
@@ -365,14 +388,15 @@ if __name__ == "__main__":
     import time
 
     rospy.init_node("inspection_env_sanity", disable_signals=False)
+
     num_evals = 100
-    env = InspectionEnv(publish_pointcloud=False, visualize=False)
+    env = InspectionEnv(publish_pointcloud=False, visualize=False, point_stride=4)
     start_time = time.time()
     obs, info = env.reset()
     print(f"Reset complete. Info: {info}\n")
     end_time = time.time()
     print(f"Time taken to reset: {end_time - start_time} seconds")
-    episodes = 10
+    episodes = 5
     start_time = time.time()
     counts = 0
     for _ in range(episodes):

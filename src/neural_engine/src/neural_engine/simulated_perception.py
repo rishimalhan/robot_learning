@@ -74,7 +74,7 @@ class SimulatedPerception:
         self.tf_listener = None
         if self._manual_camera_transform is None and self.camera_frame is None:
             self.camera_frame = sensor_cfg.get("frame")
-            self.tf_listener = tf.TransformListener()
+        self.tf_listener = tf.TransformListener()
 
         self.pointcloud_pub = rospy.Publisher(
             "/camera/points", PointCloud2, queue_size=1
@@ -255,12 +255,15 @@ class SimulatedPerception:
 
         return rgb, depth
 
-    def _unproject_depth(self, depth, rgb):
+    def _unproject_depth(self, depth, rgb, stride=1):
         """Unproject depth image to 3D points in camera frame."""
-        u, v = np.meshgrid(np.arange(self.width), np.arange(self.height))
+        stride = max(int(stride), 1)
+        u_coords = np.arange(0, self.width, stride)
+        v_coords = np.arange(0, self.height, stride)
+        u, v = np.meshgrid(u_coords, v_coords)
         u = u.reshape(-1)
         v = v.reshape(-1)
-        z = depth.reshape(-1)
+        z = depth[::stride, ::stride].reshape(-1)
 
         mask = (z > self.min_depth) & (z < self.max_depth) & (z > 0)
         if not np.any(mask):
@@ -275,7 +278,7 @@ class SimulatedPerception:
         x_ros = (u - cx_sim) * z / self.fx
         y_ros = (v - cy_sim) * z / self.fy
         points_ros = np.column_stack((x_ros, y_ros, z))
-        colors = rgb.reshape(-1, 3)[mask] / 255.0
+        colors = rgb[::stride, ::stride].reshape(-1, 3)[mask] / 255.0
 
         return points_ros, colors
 
@@ -338,20 +341,22 @@ class SimulatedPerception:
         cloud_data = np.column_stack((points, colors)).astype(np.float32)
         return pc2.create_cloud(header, self.POINTCLOUD_FIELDS, cloud_data)
 
-    def trigger(self, publish=False):
+    def trigger(self, publish=False, downsample=1):
         """Trigger perception: generate pointcloud and optionally publish to ROS.
 
         Args:
             publish: If True, publish pointcloud to ROS topic. If False, only return it.
+            downsample: Integer stride for depth/RGB unprojection (>=1).
 
         Returns:
-            PointCloud2 message or None if generation failed.
+            PointCloud2 message (default) or tuple (points, colors) when return_raw=True.
         """
+
         rgb, depth = self.render_rgb_depth()
         if rgb is None or depth is None:
             return None
 
-        points_ros, colors = self._unproject_depth(depth, rgb)
+        points_ros, colors = self._unproject_depth(depth, rgb, stride=downsample)
         if points_ros is None:
             cloud_msg = self._create_pointcloud_message([], [])
             if publish:
@@ -382,7 +387,6 @@ class SimulatedPerception:
             rospy.loginfo(
                 f"Published pointcloud with {len(filtered_points)} points for reference frame: {self.camera_frame}"
             )
-
         return cloud_msg
 
     def set_manual_camera_pose(self, position, orientation_xyzw):

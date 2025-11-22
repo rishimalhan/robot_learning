@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight voxel grid for accumulating pointcloud observations."""
 
+import itertools
 import numpy as np
 import sensor_msgs.point_cloud2 as pc2
 
@@ -75,20 +76,20 @@ class VoxelGrid:
         mask[:, :] = True
         self.surface_mask = mask
 
-    def integrate_pointcloud(self, cloud_msg, max_points=100000):
+    def integrate_pointcloud(self, cloud_msg):
         """Convert ROS PointCloud2 to numpy and integrate."""
         if cloud_msg is None:
             return 0
-        pts = []
-        for i, point in enumerate(
-            pc2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
-        ):
-            pts.append([point[0], point[1], point[2]])
-            if i + 1 >= max_points:
-                break
-        if not pts:
+        iterator = pc2.read_points(
+            cloud_msg, field_names=("x", "y", "z"), skip_nans=True
+        )
+        flat = np.fromiter(
+            (coord for point in iterator for coord in point),
+            dtype=np.float32,
+        )
+        if flat.size == 0:
             return 0
-        pts_np = np.asarray(pts, dtype=np.float32)
+        pts_np = flat.reshape(-1, 3)
         return self.integrate_points(pts_np)
 
     def get_occupancy_grid(self):
