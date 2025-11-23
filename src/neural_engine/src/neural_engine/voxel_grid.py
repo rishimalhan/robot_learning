@@ -9,7 +9,7 @@ import sensor_msgs.point_cloud2 as pc2
 class VoxelGrid:
     """Maintains an axis-aligned occupancy grid over the ROI."""
 
-    def __init__(self, bounds, grid_dims=(64, 64, 64)):
+    def __init__(self, bounds, grid_dims=(32, 32, 32)):
         """
         Args:
             bounds: dict with x_min/x_max/... describing ROI limits.

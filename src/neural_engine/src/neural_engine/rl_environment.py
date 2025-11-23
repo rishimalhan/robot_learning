@@ -89,11 +89,11 @@ class InspectionEnv(Env):
         self._step_penalty = 0.1
         self._ctx = CameraContext()
         depth_dim = int(np.prod(self._voxel_grid.grid_dims[:2]))
-        state_dim = depth_dim + 6 + 6
+        state_dim = depth_dim + 6 + 5
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32
         )
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32)
         self._marker_pub: Optional[rospy.Publisher] = None
         self._debug_cloud_pub: Optional[rospy.Publisher] = None
         if self._visualize:
@@ -225,7 +225,7 @@ class InspectionEnv(Env):
 
         action = np.asarray(action, dtype=np.float32)
         action = np.append(action, 0.0) # yaw is fixed
-        if action.shape != self._ctx.prev_action.shape:
+        if action.shape[0] != 6:
             raise ValueError("Action must be 6-dimensional delta pose.")
         pose_local = self._camera_pose_local()
         if pose_local is None:
@@ -369,7 +369,7 @@ class InspectionEnv(Env):
         if pose_local is None:
             raise RuntimeError("Camera pose is not set.")
         state = np.concatenate(
-            [depth_embedding, pose_local, self._ctx.prev_action]
+            [depth_embedding, pose_local, self._ctx.prev_action[:5]]
         ).astype(np.float32)
         return state
 
@@ -389,14 +389,14 @@ if __name__ == "__main__":
 
     rospy.init_node("inspection_env_sanity", disable_signals=False)
 
-    num_evals = 100
-    env = InspectionEnv(publish_pointcloud=False, visualize=False, point_stride=4)
+    num_evals = 20
+    env = InspectionEnv(publish_pointcloud=False, visualize=True, point_stride=4)
     start_time = time.time()
     obs, info = env.reset()
     print(f"Reset complete. Info: {info}\n")
     end_time = time.time()
     print(f"Time taken to reset: {end_time - start_time} seconds")
-    episodes = 5
+    episodes = 3
     start_time = time.time()
     counts = 0
     for _ in range(episodes):
