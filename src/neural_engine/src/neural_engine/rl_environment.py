@@ -21,6 +21,8 @@ from visualization_msgs.msg import Marker
 
 # Internal
 
+from pathlib import Path
+
 from core.utils import get_param, resolve_package_path
 from neural_engine.simulated_perception import SimulatedPerception
 from neural_engine.voxel_grid import VoxelGrid
@@ -33,10 +35,10 @@ from neural_engine.utils import (
     publish_frame_marker,
 )
 
-XY_PADDING = 0.3
-Z_PADDING = 0.1
-
 PoseTuple = Tuple[np.ndarray, np.ndarray]
+
+XY_PADDING = 0.0
+Z_PADDING = 0.0
 
 
 @dataclass
@@ -46,7 +48,7 @@ class CameraContext:
     position: Optional[np.ndarray] = None
     orientation: Optional[np.ndarray] = None
     prev_action: np.ndarray = field(
-        default_factory=lambda: np.zeros(6, dtype=np.float32)
+        default_factory=lambda: np.zeros(3, dtype=np.float32)
     )
 
 
@@ -57,7 +59,7 @@ class InspectionEnv(Env):
 
     def __init__(
         self,
-        camera_angle: float = 30.0,
+        camera_angle: float = 1.0,
         publish_pointcloud: bool = False,
         visualize: bool = False,
         point_stride: int = 1,
@@ -77,7 +79,6 @@ class InspectionEnv(Env):
         self._publish_pointcloud = publish_pointcloud
         self._visualize = visualize
         self._point_stride = max(1, int(point_stride))
-
         self._last_render = None
         self._max_sampling_attempts = 25
         self._part_rotation = np.eye(3)
@@ -86,14 +87,23 @@ class InspectionEnv(Env):
         self._part_bounds = self._compute_part_bounds()
         self._roi_bounds = self._compute_roi_bounds()
         self._voxel_grid = VoxelGrid(self._part_bounds)
-        self._step_penalty = 0.1
+        self._step_penalty = 0.05
+        self._reward_scale_factor = 5.0
+        self._penalty_scale = 0.5
         self._ctx = CameraContext()
+        self._drift_terminate_thresh = 0.2  # meters beyond ROI before terminating
+        self.action_dim = 3
+        self._action_scale = np.array([0.2, 0.2, 0.2], dtype=np.float32)
         depth_dim = int(np.prod(self._voxel_grid.grid_dims[:2]))
-        state_dim = depth_dim + 6 + 5
+        self._latent_dim = 64
+        self._latent_proj = self._load_or_create_latent_proj(depth_dim)
+        state_dim = self._latent_dim + 3 + 3
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32
         )
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32)
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(self.action_dim,), dtype=np.float32
+        )
         self._marker_pub: Optional[rospy.Publisher] = None
         self._debug_cloud_pub: Optional[rospy.Publisher] = None
         if self._visualize:
@@ -173,38 +183,39 @@ class InspectionEnv(Env):
         super().reset(seed=seed)
         self._voxel_grid.reset()
         sampled_pose: Optional[PoseTuple] = None
+        cloud_msg: Optional[PointCloud2] = None
         for _ in range(self._max_sampling_attempts):
             position, orientation = sample_pose_within_roi(
                 self._roi_bounds, self._max_tilt, shrink_scale=0.7
             )
-            if pose_within_bounds(
+            if not pose_within_bounds(
                 position=position,
                 orientation=orientation,
                 max_tilt=self._max_tilt,
                 roi_bounds=self._roi_bounds,
             ):
-                sampled_pose = (
-                    np.asarray(position, dtype=np.float32),
-                    np.asarray(orientation, dtype=np.float32),
-                )
-                self._apply_pose(*sampled_pose)
+                continue
+            sampled_pose = (
+                np.asarray(position, dtype=np.float32),
+                np.asarray(orientation, dtype=np.float32),
+            )
+            self._apply_pose(*sampled_pose)
+            trigger_result = self._perception.trigger(
+                publish=self._publish_pointcloud,
+                downsample=self._point_stride,
+            )
+            if isinstance(trigger_result, tuple):
+                points_np, _ = trigger_result
+                self._voxel_grid.integrate_points(points_np)
+            else:
+                cloud_msg = trigger_result
+                self._voxel_grid.integrate_pointcloud(cloud_msg)
+            if self._voxel_grid.coverage > 0:
                 break
         if sampled_pose is None:
             raise RuntimeError("Failed to sample valid pose during reset.")
-
-        trigger_result = self._perception.trigger(
-            publish=self._publish_pointcloud,
-            downsample=self._point_stride,
-        )
-        cloud_msg = None
-        if isinstance(trigger_result, tuple):
-            points_np, _ = trigger_result
-            self._voxel_grid.integrate_points(points_np)
-        else:
-            cloud_msg = trigger_result
-            self._voxel_grid.integrate_pointcloud(cloud_msg)
+        self._ctx.prev_action = np.zeros((self.action_dim,))
         self._visualize_scene(cloud_msg=cloud_msg)
-        self._ctx.prev_action = np.zeros_like(self._ctx.prev_action)
         state = self._build_state()
         surface_done = self._voxel_grid.is_surface_covered()
         info = {
@@ -221,51 +232,50 @@ class InspectionEnv(Env):
         return state, info
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        """Apply a 5-DOF delta in the local frame and return the new transition."""
+        """Apply a 3-DOF delta in the local frame and return the new transition."""
 
         action = np.asarray(action, dtype=np.float32)
-        action = np.append(action, 0.0) # yaw is fixed
-        if action.shape[0] != 6:
-            raise ValueError("Action must be 6-dimensional delta pose.")
+        self._ctx.prev_action = action.copy()
+        action *= self._action_scale
         pose_local = self._camera_pose_local()
-        if pose_local is None:
-            raise RuntimeError("Camera pose is not set.")
-        pos_local = pose_local[:3] + action[:3]
-        ori_local = wrap_angles(pose_local[3:] + action[3:]) # roll, pitch
+        pos_local = pose_local[:3] + action
+        ori_local = wrap_angles(pose_local[3:])
         rot_local_new = euler_matrix(*ori_local)[:3, :3]
         pos_world = self._part_rotation @ pos_local + self._part_centroid
         rot_world = self._part_rotation @ rot_local_new
         euler_world = wrap_angles(
             np.array(euler_from_matrix(rot_world), dtype=np.float32)
         )
-        out_of_bounds = not pose_within_bounds(
-            position=pos_world,
-            orientation=euler_world,
-            max_tilt=self._max_tilt,
-            roi_bounds=self._roi_bounds,
+        box_low = np.array(
+            [
+                self._roi_bounds["x_min"],
+                self._roi_bounds["y_min"],
+                self._roi_bounds["z_min"],
+            ],
+            dtype=np.float32,
         )
-        if out_of_bounds:
-            info = {
-                "pose_world": self._pose_world_vec(),
-                "pose_local": self._camera_pose_local(),
-                "action": action,
-                "coverage": self._voxel_grid.coverage,
-                "delta_coverage": 0,
-                "reward": -1.0,
-                "terminated": True,
-                "surface_covered": False,
-                "out_of_bounds": True,
-            }
-            return self._build_state(), -1.0, False, True, info
-
+        box_high = np.array(
+            [
+                self._roi_bounds["x_max"],
+                self._roi_bounds["y_max"],
+                self._roi_bounds["z_max"],
+            ],
+            dtype=np.float32,
+        )
+        oob_dist = np.maximum(0.0, pos_world - box_high) + np.maximum(
+            0.0, box_low - pos_world
+        )
+        drift_mag = float(np.linalg.norm(oob_dist))
+        out_of_bounds_penalty = self._penalty_scale * drift_mag
+        terminated = drift_mag > self._drift_terminate_thresh
+        # projected_pos = np.clip(pos_world, box_low, box_high)
+        # self._ctx.position = projected_pos.astype(np.float32)
         self._ctx.position = pos_world.astype(np.float32)
         self._ctx.orientation = euler_world
         self._perception.set_manual_camera_pose(
             self._ctx.position.tolist(),
             quaternion_from_euler(*self._ctx.orientation).tolist(),
         )
-        self._ctx.prev_action = action.copy()
-
         trigger_result = self._perception.trigger(
             publish=self._publish_pointcloud,
             downsample=self._point_stride,
@@ -279,9 +289,13 @@ class InspectionEnv(Env):
             delta_cov = self._voxel_grid.integrate_pointcloud(cloud_msg)
         self._visualize_scene(cloud_msg)
         state = self._build_state()
-        total_cov = float(self._voxel_grid.coverage) or 1.0
         surface_done = self._voxel_grid.is_surface_covered()
-        reward = (float(delta_cov) / total_cov)
+        reward = (
+            self._reward_scale_factor
+            * (float(delta_cov) / float(self._voxel_grid.surface_mask.sum()))
+            - out_of_bounds_penalty
+            - self._step_penalty
+        )
         info = {
             "pose_world": self._pose_world_vec(),
             "pose_local": self._camera_pose_local(),
@@ -289,11 +303,11 @@ class InspectionEnv(Env):
             "coverage": self._voxel_grid.coverage,
             "delta_coverage": delta_cov,
             "reward": reward,
-            "terminated": False,
+            "terminated": terminated,
             "surface_covered": surface_done,
             "out_of_bounds": "N/A",
         }
-        return state, reward, surface_done, False, info
+        return state, reward, surface_done, terminated, info
 
     def _visualize_scene(
         self,
@@ -336,6 +350,19 @@ class InspectionEnv(Env):
             length=0.1,
         )
 
+    def _load_or_create_latent_proj(self, depth_dim: int) -> np.ndarray:
+        latent_path = Path(__file__).resolve().parent / "latent_projection.npy"
+        if latent_path.exists():
+            matrix = np.load(latent_path)
+            if matrix.shape == (self._latent_dim, depth_dim):
+                return matrix.astype(np.float32)
+        rng = np.random.default_rng()
+        matrix = rng.normal(
+            loc=0.0, scale=1.0, size=(self._latent_dim, depth_dim)
+        ).astype(np.float32)
+        np.save(latent_path, matrix)
+        return matrix
+
     def _camera_pose_local(self) -> Optional[np.ndarray]:
         """Return current camera pose expressed in part-centric coordinates."""
         if self._ctx.position is None or self._ctx.orientation is None:
@@ -362,15 +389,16 @@ class InspectionEnv(Env):
         )
 
     def _build_state(self) -> np.ndarray:
-        depth_embedding = self._voxel_grid.get_depth_embedding(flatten=True).astype(
+        depth_flat = self._voxel_grid.get_depth_embedding(flatten=True).astype(
             np.float32
         )
+        latent = (self._latent_proj @ depth_flat).astype(np.float32)
         pose_local = self._camera_pose_local()
         if pose_local is None:
             raise RuntimeError("Camera pose is not set.")
-        state = np.concatenate(
-            [depth_embedding, pose_local, self._ctx.prev_action[:5]]
-        ).astype(np.float32)
+        state = np.concatenate([latent, pose_local[:3], self._ctx.prev_action]).astype(
+            np.float32
+        )
         return state
 
     def render(self) -> np.ndarray:
@@ -387,23 +415,20 @@ class InspectionEnv(Env):
 if __name__ == "__main__":
     import time
 
-    rospy.init_node("inspection_env_sanity", disable_signals=False)
+    rospy.init_node("inspection_env_sanity", disable_signals=True)
 
-    num_evals = 20
+    num_evals = 10
     env = InspectionEnv(publish_pointcloud=False, visualize=True, point_stride=4)
-    start_time = time.time()
-    obs, info = env.reset()
-    print(f"Reset complete. Info: {info}\n")
-    end_time = time.time()
-    print(f"Time taken to reset: {end_time - start_time} seconds")
-    episodes = 3
+    episodes = 5
     start_time = time.time()
     counts = 0
     for _ in range(episodes):
+        obs, info = env.reset()
+        print(f"Reset complete. Info: {info}\n")
         for i in range(num_evals):
             counts += 1
-            mean = np.array([0.0, 0.0, 0.0, 0.0, 0.0]) # x, y, z, roll, pitch
-            sigma = np.array([0.05, 0.05, 0.05, 0.1, 0.1])
+            mean = np.array([0.0, 0.0, 0.0])  # x, y, z, roll, pitch
+            sigma = np.array([1.0, 1.0, 1.0])
             action = np.random.normal(mean, sigma)
             obs, reward, done, terminated, info = env.step(action)
             print(f"Step -> {i+1}, info={info}\n")
