@@ -22,7 +22,8 @@ from tf.transformations import (
 
 # Internal
 
-from core.utils import get_param, resolve_package_path, convert_stl_to_obj
+from core.utils import convert_stl_to_obj
+from neural_engine.scene_assets import get_part_spec
 
 
 class SimulatedPerception:
@@ -86,24 +87,15 @@ class SimulatedPerception:
         if self._load_environment(wait=False):
             rospy.loginfo("Inspection scene updated from environment parameters.")
 
-    def _load_environment(self, wait):
-        timeout = rospy.Time.now() + rospy.Duration(10.0) if wait else None
-        spec = get_param("/environment/part", None)
-        while spec is None and wait and rospy.Time.now() < timeout:
-            rospy.sleep(0.5)
-            spec = get_param("/environment/part", None)
-        if spec is None:
-            if wait:
-                raise RuntimeError("Inspection part not available on parameter server.")
-            return False
-
-        mesh_path = resolve_package_path(spec["mesh_path"])
+    def _load_environment(self, wait):  # wait arg retained for API compatibility
+        spec = get_part_spec()
+        mesh_path = spec["mesh_path"]
         pose = spec.get("pose")
         position = pose.get("position")
         orientation = pose.get("orientation")
         scale = spec.get("scale")
 
-        signature = (mesh_path, position, orientation, scale)
+        signature = (mesh_path, tuple(position), tuple(orientation), tuple(scale))
         if signature == self._env_signature:
             return False
 
@@ -354,7 +346,7 @@ class SimulatedPerception:
 
         rgb, depth = self.render_rgb_depth()
         if rgb is None or depth is None:
-            return None
+                return None
 
         points_ros, colors = self._unproject_depth(depth, rgb, stride=downsample)
         if points_ros is None:
@@ -387,7 +379,7 @@ class SimulatedPerception:
             rospy.loginfo(
                 f"Published pointcloud with {len(filtered_points)} points for reference frame: {self.camera_frame}"
             )
-        return cloud_msg
+            return cloud_msg
 
     def set_manual_camera_pose(self, position, orientation_xyzw):
         """Set camera pose manually (bypass TF)."""

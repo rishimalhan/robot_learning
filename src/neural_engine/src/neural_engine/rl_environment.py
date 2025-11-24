@@ -8,7 +8,7 @@ import rospy
 import numpy as np
 import trimesh
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from gymnasium import Env, spaces
 from tf.transformations import (
     euler_matrix,
@@ -23,7 +23,7 @@ from visualization_msgs.msg import Marker
 
 from pathlib import Path
 
-from core.utils import get_param, resolve_package_path
+from neural_engine.scene_assets import get_part_spec
 from neural_engine.simulated_perception import SimulatedPerception
 from neural_engine.voxel_grid import VoxelGrid
 from neural_engine.utils import (
@@ -33,6 +33,7 @@ from neural_engine.utils import (
     publish_voxel_grid,
     publish_pointcloud,
     publish_frame_marker,
+    publish_part_marker,
 )
 
 PoseTuple = Tuple[np.ndarray, np.ndarray]
@@ -84,18 +85,22 @@ class InspectionEnv(Env):
         self._part_rotation = np.eye(3)
         self._part_rotation_inv = np.eye(3)
         self._part_centroid = np.zeros(3)
+        self._part_spec = None
         self._part_bounds = self._compute_part_bounds()
         self._roi_bounds = self._compute_roi_bounds()
         self._voxel_grid = VoxelGrid(self._part_bounds)
         self._step_penalty = 0.05
-        self._reward_scale_factor = 5.0
-        self._penalty_scale = 0.5
+        self._reward_scale_factor = 10.0
+        self._penalty_scale = 5.0
+        self._novelty_threshold = 0.05
+        self._curiosity_bonus = 0.5
+        self._visited_positions: List[np.ndarray] = []
         self._ctx = CameraContext()
         self._drift_terminate_thresh = 0.2  # meters beyond ROI before terminating
         self.action_dim = 3
         self._action_scale = np.array([0.2, 0.2, 0.2], dtype=np.float32)
         depth_dim = int(np.prod(self._voxel_grid.grid_dims[:2]))
-        self._latent_dim = 64
+        self._latent_dim = 128
         self._latent_proj = self._load_or_create_latent_proj(depth_dim)
         state_dim = self._latent_dim + 3 + 3
         self.observation_space = spaces.Box(
@@ -105,14 +110,34 @@ class InspectionEnv(Env):
             low=-1.0, high=1.0, shape=(self.action_dim,), dtype=np.float32
         )
         self._marker_pub: Optional[rospy.Publisher] = None
+        self._part_marker_pub: Optional[rospy.Publisher] = None
         self._debug_cloud_pub: Optional[rospy.Publisher] = None
         if self._visualize:
             self._marker_pub = rospy.Publisher(
                 "/inspection_env/markers", Marker, queue_size=10
             )
+            self._part_marker_pub = rospy.Publisher(
+                "/inspection_env/part_marker", Marker, queue_size=1
+            )
             self._debug_cloud_pub = rospy.Publisher(
                 "/inspection_env/pointcloud", PointCloud2, queue_size=1
             )
+
+    def _register_position(self, position: Optional[np.ndarray]) -> float:
+        """Track novel positions for curiosity-driven reward."""
+        if position is None:
+            return 0.0
+        pos = np.asarray(position, dtype=np.float32)
+        if not self._visited_positions:
+            self._visited_positions.append(pos)
+            return self._curiosity_bonus
+        history = np.stack(self._visited_positions, axis=0)
+        dists = np.linalg.norm(history - pos, axis=1)
+        min_dist = float(dists.min())
+        if min_dist >= self._novelty_threshold:
+            self._visited_positions.append(pos)
+            return self._curiosity_bonus
+        return 0.0
 
     def _apply_pose(self, position: np.ndarray, euler: np.ndarray) -> None:
         """Apply the provided pose to MuJoCo and cache it in the context."""
@@ -127,13 +152,9 @@ class InspectionEnv(Env):
 
     def _compute_part_bounds(self) -> dict:
         """Compute axis-aligned bounding box for the current part."""
-        spec = get_param("/environment/part", None)
-        if spec is None:
-            raise RuntimeError("Part specification not available on parameter server.")
-
-        mesh_path = resolve_package_path(spec["mesh_path"])
-        mesh = trimesh.load(mesh_path, force="mesh")
-
+        spec = get_part_spec()
+        self._part_spec = spec
+        mesh = trimesh.load(spec["mesh_path"], force="mesh")
         scale = spec.get("scale")
         mesh.apply_scale(scale)
         pose = spec.get("pose")
@@ -181,6 +202,7 @@ class InspectionEnv(Env):
     ) -> Tuple[np.ndarray, dict]:
         """Reset MuJoCo, resample a feasible camera pose, and clear voxel memory."""
         super().reset(seed=seed)
+        self._visited_positions: List[np.ndarray] = []
         self._voxel_grid.reset()
         sampled_pose: Optional[PoseTuple] = None
         cloud_msg: Optional[PointCloud2] = None
@@ -215,6 +237,7 @@ class InspectionEnv(Env):
         if sampled_pose is None:
             raise RuntimeError("Failed to sample valid pose during reset.")
         self._ctx.prev_action = np.zeros((self.action_dim,))
+        self._register_position(self._ctx.position)
         self._visualize_scene(cloud_msg=cloud_msg)
         state = self._build_state()
         surface_done = self._voxel_grid.is_surface_covered()
@@ -276,6 +299,7 @@ class InspectionEnv(Env):
             self._ctx.position.tolist(),
             quaternion_from_euler(*self._ctx.orientation).tolist(),
         )
+        novelty_bonus = self._register_position(self._ctx.position)
         trigger_result = self._perception.trigger(
             publish=self._publish_pointcloud,
             downsample=self._point_stride,
@@ -293,6 +317,7 @@ class InspectionEnv(Env):
         reward = (
             self._reward_scale_factor
             * (float(delta_cov) / float(self._voxel_grid.surface_mask.sum()))
+            + novelty_bonus
             - out_of_bounds_penalty
             - self._step_penalty
         )
@@ -306,6 +331,7 @@ class InspectionEnv(Env):
             "terminated": terminated,
             "surface_covered": surface_done,
             "out_of_bounds": "N/A",
+            "novelty_bonus": novelty_bonus,
         }
         return state, reward, surface_done, terminated, info
 
@@ -318,37 +344,40 @@ class InspectionEnv(Env):
             return
         if self._debug_cloud_pub is not None and cloud_msg is not None:
             publish_pointcloud(self._debug_cloud_pub, cloud_msg)
-        if self._marker_pub is None:
-            return
-        publish_voxel_grid(self._marker_pub, self._voxel_grid)
-        publish_frame_marker(
-            self._marker_pub,
-            np.zeros(3, dtype=np.float32),
-            np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
-            "world_axes",
-            1,
-            length=1.0,
-        )
+        if self._marker_pub is not None:
+            publish_voxel_grid(self._marker_pub, self._voxel_grid)
+            publish_frame_marker(
+                self._marker_pub,
+                np.zeros(3, dtype=np.float32),
+                np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+                "world_axes",
+                1,
+                length=1.0,
+            )
         part_tf = np.eye(4, dtype=np.float64)
         part_tf[:3, :3] = self._part_rotation.astype(np.float64, copy=False)
         part_quat = quaternion_from_matrix(part_tf)
-        publish_frame_marker(
-            self._marker_pub,
-            self._part_centroid,
-            part_quat,
-            "part_axes",
-            2,
-            length=0.5,
-        )
+        if self._marker_pub is not None:
+            publish_frame_marker(
+                self._marker_pub,
+                self._part_centroid,
+                part_quat,
+                "part_axes",
+                2,
+                length=0.5,
+            )
+        if self._part_marker_pub is not None and self._part_spec is not None:
+            publish_part_marker(self._part_marker_pub, self._part_spec)
         curr_quat = quaternion_from_euler(*self._ctx.orientation)
-        publish_frame_marker(
-            self._marker_pub,
-            self._ctx.position,
-            curr_quat,
-            "camera_active",
-            3,
-            length=0.1,
-        )
+        if self._marker_pub is not None:
+            publish_frame_marker(
+                self._marker_pub,
+                self._ctx.position,
+                curr_quat,
+                "camera_active",
+                3,
+                length=0.1,
+            )
 
     def _load_or_create_latent_proj(self, depth_dim: int) -> np.ndarray:
         latent_path = Path(__file__).resolve().parent / "latent_projection.npy"
@@ -418,8 +447,8 @@ if __name__ == "__main__":
     rospy.init_node("inspection_env_sanity", disable_signals=True)
 
     num_evals = 10
-    env = InspectionEnv(publish_pointcloud=False, visualize=True, point_stride=4)
-    episodes = 5
+    env = InspectionEnv(publish_pointcloud=True, visualize=True, point_stride=4)
+    episodes = 1
     start_time = time.time()
     counts = 0
     for _ in range(episodes):

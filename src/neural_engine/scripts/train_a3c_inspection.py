@@ -227,15 +227,17 @@ def visualize_policy(model: ActorCritic, cfg: A3CConfig):
     )
     state, info = env.reset()
     done = False
+    terminated = False
     print("Starting visualization run...")
     try:
-        while not done:
+        steps = 0
+        while not done and not terminated and steps < 50:
             state_t = torch.tensor(state[None, :], dtype=torch.float32, device=DEVICE)
             with torch.no_grad():
                 mean, _, _ = model.forward(state_t)
             action = mean.squeeze(0).cpu().numpy()
             state, reward, done, terminated, info = env.step(action)
-            done = done or terminated
+            steps += 1
     except KeyboardInterrupt:
         print("Visualization interrupted by user.")
     finally:

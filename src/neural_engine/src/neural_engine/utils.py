@@ -4,7 +4,12 @@
 
 import numpy as np
 import rospy
-from tf.transformations import euler_matrix, euler_from_matrix, quaternion_matrix
+from tf.transformations import (
+    euler_matrix,
+    euler_from_matrix,
+    quaternion_matrix,
+    quaternion_from_euler,
+)
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import ColorRGBA
@@ -164,5 +169,42 @@ def publish_frame_marker(
     marker.points = points
     marker.colors = colors
     marker.pose.orientation.w = 1.0
+    marker_pub.publish(marker)
+    rospy.sleep(0.3)
+
+
+def publish_part_marker(marker_pub, part_spec, marker_id=50, frame_id="world"):
+    """Publish the inspection part mesh as a marker."""
+    if marker_pub is None or part_spec is None:
+        return
+    marker = Marker()
+    marker.header.frame_id = frame_id
+    marker.header.stamp = rospy.Time.now()
+    marker.ns = "inspection_part"
+    marker.id = marker_id
+    marker.type = Marker.MESH_RESOURCE
+    marker.action = Marker.ADD
+    mesh_path = part_spec.get("mesh_path")
+    if not mesh_path:
+        return
+    marker.mesh_resource = f"file://{mesh_path}"
+    marker.mesh_use_embedded_materials = False
+    scale = part_spec.get("scale", [1.0, 1.0, 1.0])
+    marker.scale.x = scale[0]
+    marker.scale.y = scale[1]
+    marker.scale.z = scale[2]
+    color = ColorRGBA(0.8, 0.2, 0.2, 0.6)
+    marker.color = color
+    pose = part_spec.get("pose", {})
+    position = pose.get("position", [0.0, 0.0, 0.0])
+    orientation = pose.get("orientation", [0.0, 0.0, 0.0])
+    marker.pose.position.x = position[0]
+    marker.pose.position.y = position[1]
+    marker.pose.position.z = position[2]
+    quat = quaternion_from_euler(*orientation)
+    marker.pose.orientation.x = quat[0]
+    marker.pose.orientation.y = quat[1]
+    marker.pose.orientation.z = quat[2]
+    marker.pose.orientation.w = quat[3]
     marker_pub.publish(marker)
     rospy.sleep(0.3)
