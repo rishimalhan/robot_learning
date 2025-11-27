@@ -67,7 +67,9 @@ def get_part_spec(part_name: str = PART_NAME) -> Dict[str, object]:
     }
 
 
-def load_part_mesh(apply_pose: bool = True) -> Tuple[trimesh.Trimesh, Dict[str, object]]:
+def load_part_mesh(
+    apply_pose: bool = True,
+) -> Tuple[trimesh.Trimesh, Dict[str, object]]:
     """Load the configured part mesh and optionally apply its canonical pose."""
     spec = get_part_spec()
     mesh = _scaled_mesh(spec["name"]).copy()
@@ -76,4 +78,3 @@ def load_part_mesh(apply_pose: bool = True) -> Tuple[trimesh.Trimesh, Dict[str, 
         transform[:3, 3] = spec["pose"]["position"]
         mesh.apply_transform(transform)
     return mesh, spec
-

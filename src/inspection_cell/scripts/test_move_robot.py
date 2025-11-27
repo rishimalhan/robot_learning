@@ -30,7 +30,7 @@ def main():
     markers, tf_broadcaster = init_visualization()
 
     # Get the robot_roi bounds
-    roi_bounds = get_robot_roi_bounds(env)
+    roi_bounds = get_robot_roi_bounds()
     if not roi_bounds:
         rospy.logerr("Required robot_roi object not found in the scene. Exiting.")
         return
@@ -45,8 +45,9 @@ def main():
         if success and plan:
             executor.execute_plan(plan)
         else:
-            rospy.logerr("Failed to plan to home position")
-            return
+            if not success:
+                rospy.logerr("Failed to plan to home position")
+                return
 
         # Get current pose - we'll use this to calculate the z-offset
         current_pose = env.planner.move_group.get_current_pose("tool0").pose
@@ -59,8 +60,8 @@ def main():
         rospy.loginfo("Step 2: Setting up zigzag pattern waypoints...")
 
         # Define grid size
-        grid_points_x = 10  # Number of points in X direction
-        grid_points_y = 10  # Number of points in Y direction
+        grid_points_x = 5  # Number of points in X direction
+        grid_points_y = 5  # Number of points in Y direction
 
         # Calculate step sizes based on ROI bounds with margins
         margin_x = 0.2

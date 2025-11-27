@@ -300,7 +300,9 @@ class SimulatedPerception:
 
         T_ros = self.get_camera_transform()
         if T_ros is None:
-            return points_world, colors
+            raise RuntimeError(
+                "Camera transform not available while filtering points based on physical constraints."
+            )
 
         camera_pos = T_ros[:3, 3]
         camera_R = T_ros[:3, :3]
@@ -346,7 +348,7 @@ class SimulatedPerception:
 
         rgb, depth = self.render_rgb_depth()
         if rgb is None or depth is None:
-                return None
+            return None
 
         points_ros, colors = self._unproject_depth(depth, rgb, stride=downsample)
         if points_ros is None:
@@ -379,7 +381,7 @@ class SimulatedPerception:
             rospy.loginfo(
                 f"Published pointcloud with {len(filtered_points)} points for reference frame: {self.camera_frame}"
             )
-            return cloud_msg
+        return cloud_msg
 
     def set_manual_camera_pose(self, position, orientation_xyzw):
         """Set camera pose manually (bypass TF)."""

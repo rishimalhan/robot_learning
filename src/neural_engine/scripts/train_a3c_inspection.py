@@ -4,16 +4,16 @@
 # External
 
 import argparse
-import time
 from pathlib import Path
 from dataclasses import dataclass
+from typing import List
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Normal
-from torch.nn.utils import clip_grad_norm_
+from collections import defaultdict
 import rospy
 
 # Internal
@@ -37,12 +37,10 @@ def make_env(
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 512):
+    def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
         self.backbone = nn.Sequential(
             nn.Linear(obs_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -53,9 +51,9 @@ class ActorCritic(nn.Module):
 
     def forward(self, x: torch.Tensor):
         feat = self.backbone(x)
-        mean = torch.clip(torch.tanh(self.policy_mean(feat)), -1.0, 1.0)
-        log_std = torch.clamp(self.policy_log_std_head(feat), -5.0, 2.0)
-        std = torch.exp(log_std)
+        mean = self.policy_mean(feat)
+        var = F.softplus(self.policy_log_std_head(feat)) + 1e-6
+        std = torch.sqrt(var)
         value = self.value_head(feat).squeeze(-1)
         return mean, std, value
 
@@ -79,6 +77,7 @@ class A3CConfig:
     visualize_policy: bool = False
     publish_pointcloud: bool = False
     point_stride: int = 4
+    n_step_horizon: int = 5
 
 
 class EnvBatch:
@@ -123,27 +122,48 @@ class EnvBatch:
 def evaluate_policy(
     env: InspectionEnv,
     model: ActorCritic,
-    cfg: A3CConfig,
     episodes: int = 3,
-    max_steps: int = 1000,
-) -> float:
+    max_steps: int = 10,
+) -> str:
     device = next(model.parameters()).device
     model.eval()
-    total_return = 0.0
-    for _ in range(episodes):
+    breakdown_history = {
+        "coverage": [],
+        "penalty": [],
+        "orientation_violation": [],
+        "oob_dist": [],
+    }
+    for episode_idx in range(episodes):
         state, _ = env.reset()
-        episode_return = 0.0
+        episode_breakdown = defaultdict(float)
         for _ in range(max_steps):
             state_t = torch.tensor(state[None, :], dtype=torch.float32, device=device)
             with torch.no_grad():
                 mean, _, _ = model.forward(state_t)
             action = mean.squeeze(0).cpu().numpy()
-            state, reward, done, terminated, _ = env.step(action)
-            episode_return += reward
+            state, reward, done, terminated, info = env.step(action)
+            rb = info.get("reward_breakdown")
+            episode_breakdown["coverage"] += float(rb.get("coverage"))
+            episode_breakdown["penalty"] += float(rb.get("penalty"))
+            episode_breakdown["steps"] += 1
+            episode_breakdown["orientation_violation"] += float(
+                rb.get("orientation_violation")
+            )
+            episode_breakdown["oob_dist"] += float(rb.get("oob_dist"))
             if done or terminated:
                 break
-        total_return += episode_return
-    return total_return / episodes
+        for key in ("coverage", "penalty", "orientation_violation", "oob_dist"):
+            breakdown_history[key].append(episode_breakdown[key])
+        message = (
+            "[Eval] Episode "
+            f"{episode_idx + 1}/{episodes} | steps={episode_breakdown['steps']} "
+            f"| coverage={float(episode_breakdown['coverage']):.3f} "
+            f"| penalty={float(episode_breakdown['penalty']):.3f} "
+            f"| orientation_violation={float(episode_breakdown['orientation_violation']):.3f} "
+            f"| oob_dist={float(episode_breakdown['oob_dist']):.3f}"
+        )
+        return message
+    return "N/A"
 
 
 def train(cfg: A3CConfig):
@@ -169,43 +189,73 @@ def train(cfg: A3CConfig):
     states = batcher.reset()
 
     try:
-        for step in range(1, cfg.total_steps + 1):
-            states_t = torch.tensor(states, dtype=torch.float32, device=DEVICE)
-            dist = model.dist(states_t)
-            actions_t = dist.rsample()
-            log_probs = dist.log_prob(actions_t).sum(-1)
-            entropy = dist.entropy().sum(-1)
-            values = model.value(states_t)
+        step = 0
+        while step < cfg.total_steps:
+            rollout_log_probs: List[torch.Tensor] = []
+            rollout_entropies: List[torch.Tensor] = []
+            rollout_values: List[torch.Tensor] = []
+            rollout_rewards: List[torch.Tensor] = []
+            rollout_dones: List[torch.Tensor] = []
+            rollout_len = 0
 
-            next_states, rewards, dones, _ = batcher.step(
-                actions_t.detach().cpu().numpy()
-            )
-            rewards_t = torch.tensor(rewards, dtype=torch.float32, device=DEVICE)
-            dones_t = torch.tensor(dones, dtype=torch.float32, device=DEVICE)
-            next_states_t = torch.tensor(next_states, dtype=torch.float32, device=DEVICE)
+            while rollout_len < cfg.n_step_horizon and step < cfg.total_steps:
+                states_t = torch.tensor(states, dtype=torch.float32, device=DEVICE)
+                dist = model.dist(states_t)
+                actions_t = dist.rsample()
+                log_probs = dist.log_prob(actions_t).sum(-1)
+                entropy = dist.entropy().sum(-1)
+                values = model.value(states_t)
+
+                next_states, rewards, dones, _ = batcher.step(
+                    actions_t.detach().cpu().numpy()
+                )
+
+                rollout_log_probs.append(log_probs)
+                rollout_entropies.append(entropy)
+                rollout_values.append(values)
+                rollout_rewards.append(
+                    torch.tensor(rewards, dtype=torch.float32, device=DEVICE)
+                )
+                rollout_dones.append(
+                    torch.tensor(dones, dtype=torch.float32, device=DEVICE)
+                )
+
+                states = next_states
+                rollout_len += 1
+                step += 1
+
+            next_states_t = torch.tensor(states, dtype=torch.float32, device=DEVICE)
             next_values = model.value(next_states_t).detach()
-            targets = rewards_t + cfg.gamma * next_values * (1.0 - dones_t)
-            advantages = targets - values
 
-            actor_loss = -(log_probs * advantages.detach()).mean()
-            critic_loss = advantages.pow(2).mean()
-            entropy_loss = -entropy.mean()
+            returns = next_values
+            actor_loss = torch.zeros(1, device=DEVICE)
+            critic_loss = torch.zeros(1, device=DEVICE)
+            entropy_loss = torch.zeros(1, device=DEVICE)
+
+            for t in reversed(range(rollout_len)):
+                mask = 1.0 - rollout_dones[t]
+                returns = rollout_rewards[t] + cfg.gamma * returns * mask
+                advantages = returns - rollout_values[t]
+
+                actor_loss += -(rollout_log_probs[t] * advantages.detach()).mean()
+                critic_loss += advantages.pow(2).mean()
+                entropy_loss += -rollout_entropies[t].mean()
+
+            rollout_scale = float(max(rollout_len, 1))
             loss = (
-                actor_loss
-                + cfg.value_coef * critic_loss
-                + cfg.entropy_coef * entropy_loss
+                actor_loss / rollout_scale
+                + cfg.value_coef * (critic_loss / rollout_scale)
+                + cfg.entropy_coef * (entropy_loss / rollout_scale)
             )
 
             optimizer.zero_grad()
             loss.backward()
-            clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
 
-            states = next_states
             if step % 100 == 0:
-                eval_return = evaluate_policy(eval_env, model, cfg)
+                eval_return = evaluate_policy(eval_env, model)
                 print(
-                    f"Step {step}/{cfg.total_steps} | Loss {loss.item():.4f} | Eval return {eval_return:.3f}"
+                    f"Step {step}/{cfg.total_steps} | Eval: {eval_return}\n"
                 )
             if step % 1000 == 0:
                 torch.save(model.state_dict(), CHECKPOINT_PATH)
@@ -214,35 +264,6 @@ def train(cfg: A3CConfig):
     finally:
         eval_env.close()
         batcher.close()
-
-
-def visualize_policy(model: ActorCritic, cfg: A3CConfig):
-    if CHECKPOINT_PATH.exists():
-        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
-        print(f"Loaded checkpoint from {CHECKPOINT_PATH}")
-    env = make_env(
-        publish_pointcloud=True,
-        visualize=True,
-        point_stride=cfg.point_stride,
-    )
-    state, info = env.reset()
-    done = False
-    terminated = False
-    print("Starting visualization run...")
-    try:
-        steps = 0
-        while not done and not terminated and steps < 50:
-            state_t = torch.tensor(state[None, :], dtype=torch.float32, device=DEVICE)
-            with torch.no_grad():
-                mean, _, _ = model.forward(state_t)
-            action = mean.squeeze(0).cpu().numpy()
-            state, reward, done, terminated, info = env.step(action)
-            steps += 1
-    except KeyboardInterrupt:
-        print("Visualization interrupted by user.")
-    finally:
-        env.close()
-    print("Visualization finished.")
 
 
 def main():
@@ -270,10 +291,18 @@ def main():
         model = ActorCritic(
             sample_env.observation_space.shape[0], sample_env.action_space.shape[0]
         ).to(DEVICE)
+        sample_env.close()
         model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
         print(f"Loaded checkpoint from {CHECKPOINT_PATH}")
-        sample_env.close()
-        visualize_policy(model, cfg)
+        viz_env = make_env(
+            publish_pointcloud=True,
+            visualize=True,
+            point_stride=cfg.point_stride,
+        )
+        try:
+            evaluate_policy(viz_env, model, episodes=1, max_steps=20)
+        finally:
+            viz_env.close()
     else:
         train(cfg)
 

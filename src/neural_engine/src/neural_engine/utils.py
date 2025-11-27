@@ -22,9 +22,8 @@ def wrap_angles(angles):
     return ((angles + np.pi) % (2 * np.pi)) - np.pi
 
 
-def sample_pose_within_roi(roi_bounds, max_tilt, rng=None, shrink_scale=0.0):
+def sample_pose_within_roi(roi_bounds, max_tilt, shrink_scale=0.2):
     """Sample a position/orientation pair within ROI bounds and tilt cone."""
-    rng = rng or np.random.default_rng()
     x_min, x_max = roi_bounds["x_min"], roi_bounds["x_max"]
     y_min, y_max = roi_bounds["y_min"], roi_bounds["y_max"]
     z_min, z_max = roi_bounds["z_min"], roi_bounds["z_max"]
@@ -37,39 +36,31 @@ def sample_pose_within_roi(roi_bounds, max_tilt, rng=None, shrink_scale=0.0):
         z_max = z_max - (z_max - z_min) * shrink_scale / 2.0
     position = np.array(
         [
-            rng.uniform(x_min, x_max),
-            rng.uniform(y_min, y_max),
-            rng.uniform(z_min, z_max),
+            np.random.uniform(low=x_min, high=x_max),
+            np.random.uniform(low=y_min, high=y_max),
+            np.random.uniform(low=z_min, high=z_max),
         ],
         dtype=np.float32,
     )
+    phi = float(np.random.uniform(low=0.0, high=max_tilt))
+    theta = float(np.random.uniform(low=-np.pi, high=np.pi))
 
-    tilt = rng.uniform(0.0, max_tilt)
-    azimuth = rng.uniform(0.0, 2 * np.pi)
-    forward = np.array(
+    z_axis = np.array(
         [
-            np.sin(tilt) * np.cos(azimuth),
-            np.sin(tilt) * np.sin(azimuth),
-            -np.cos(tilt),
+            np.sin(phi) * np.cos(theta),
+            np.sin(phi) * np.sin(theta),
+            -np.cos(phi),
         ],
         dtype=np.float32,
-    )
-    forward /= np.linalg.norm(forward) + 1e-9
-    up_world = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    if abs(np.dot(forward, up_world)) > 0.95:
-        up_world = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-
-    right = np.cross(up_world, forward)
-    right /= np.linalg.norm(right) + 1e-9
-    up = np.cross(forward, right)
-
-    rot = np.eye(3)
-    rot[:, 0] = right
-    rot[:, 1] = up
-    rot[:, 2] = forward
-
-    euler = wrap_angles(np.array(euler_from_matrix(rot, axes="sxyz"), dtype=np.float32))
-    euler[2] = 0.0  # enforce zero yaw
+    ).reshape(3)
+    z_axis /= np.linalg.norm(z_axis)
+    up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    x_axis = np.cross(up, z_axis)
+    x_axis /= np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+    y_axis /= np.linalg.norm(y_axis)
+    rot = np.stack([x_axis, y_axis, z_axis], axis=1).astype(np.float64, copy=False)
+    euler = np.array(euler_from_matrix(rot, axes="sxyz"), dtype=np.float32)
     return position, euler
 
 

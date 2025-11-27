@@ -193,7 +193,7 @@ def main():
 
         # Move to home position first
         rospy.loginfo("Moving to home position...")
-        success, plan, planning_time, _ = env.planner.plan_to_named_target("home")
+        success, plan, _, _ = env.planner.plan_to_named_target("home")
         if success:
             if plan:
                 executor.execute_plan(plan)
@@ -203,9 +203,7 @@ def main():
             return
 
         # Step 1: Generate viewpoints
-        response = generate_viewpoints(
-            vert_angle=30.0, horz_angle=45.0, num_samples=1000
-        )
+        response = generate_viewpoints(vert_angle=30.0, horz_angle=45.0, num_samples=10)
 
         if response is None:
             rospy.logerr("Failed to generate viewpoints")

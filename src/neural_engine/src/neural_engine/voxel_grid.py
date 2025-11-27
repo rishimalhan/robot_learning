@@ -30,14 +30,19 @@ class VoxelGrid:
         )
         self.voxel_size = self.extents / self.grid_dims.astype(np.float32)
         self.surface_mask = np.zeros(self.grid_dims[:2], dtype=bool)
+        self._coverage_threshold = 3
+        self._last_pose_signature = None
+        self._pose_tol = 1e-5
         self.reset()
         self._compute_surface_mask()
 
     def reset(self):
         """Clear occupancy grid."""
         self.occupancy = np.zeros(self.grid_dims, dtype=bool)
+        self._counts = np.zeros(self.grid_dims, dtype=np.int16)
         self.coverage = 0
         self._surface_covered = np.zeros_like(self.surface_mask, dtype=bool)
+        self._last_pose_signature = None
 
     def _points_to_indices(self, points):
         """Convert Nx3 points to voxel indices."""
@@ -50,16 +55,35 @@ class VoxelGrid:
             return None
         return idx[mask]
 
-    def integrate_points(self, points):
+    def _pose_changed(self, pose_signature):
+        if pose_signature is None:
+            return True
+        pose_signature = np.asarray(pose_signature, dtype=np.float32).flatten()
+        if (
+            self._last_pose_signature is not None
+            and pose_signature.shape == self._last_pose_signature.shape
+            and np.allclose(
+                self._last_pose_signature, pose_signature, atol=self._pose_tol
+            )
+        ):
+            return False
+        self._last_pose_signature = pose_signature
+        return True
+
+    def integrate_points(self, points, pose_signature=None):
         """Update grid with Nx3 numpy points in world frame."""
         if points is None or points.size == 0:
+            return 0
+        if not self._pose_changed(pose_signature):
             return 0
         idx = self._points_to_indices(points)
         if idx is None:
             return 0
         before = self.coverage
         unique = np.unique(idx, axis=0)
-        self.occupancy[unique[:, 0], unique[:, 1], unique[:, 2]] = True
+        self._counts[unique[:, 0], unique[:, 1], unique[:, 2]] += 1
+        covered_mask = self._counts >= self._coverage_threshold
+        self.occupancy[covered_mask] = True
         surface_hits = self.surface_mask[unique[:, 0], unique[:, 1]]
         self._surface_covered[unique[surface_hits, 0], unique[surface_hits, 1]] = True
         self.coverage = int(self.occupancy.sum())
@@ -76,7 +100,7 @@ class VoxelGrid:
         mask[:, :] = True
         self.surface_mask = mask
 
-    def integrate_pointcloud(self, cloud_msg):
+    def integrate_pointcloud(self, cloud_msg, pose_signature=None):
         """Convert ROS PointCloud2 to numpy and integrate."""
         if cloud_msg is None:
             return 0
@@ -90,7 +114,7 @@ class VoxelGrid:
         if flat.size == 0:
             return 0
         pts_np = flat.reshape(-1, 3)
-        return self.integrate_points(pts_np)
+        return self.integrate_points(pts_np, pose_signature=pose_signature)
 
     def get_occupancy_grid(self):
         """Return a copy of the occupancy array."""
