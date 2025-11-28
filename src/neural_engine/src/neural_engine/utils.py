@@ -24,16 +24,20 @@ def wrap_angles(angles):
 
 def sample_pose_within_roi(roi_bounds, max_tilt, shrink_scale=0.2):
     """Sample a position/orientation pair within ROI bounds and tilt cone."""
+    shrink = float(np.clip(shrink_scale, 0.0, 0.99))
     x_min, x_max = roi_bounds["x_min"], roi_bounds["x_max"]
     y_min, y_max = roi_bounds["y_min"], roi_bounds["y_max"]
     z_min, z_max = roi_bounds["z_min"], roi_bounds["z_max"]
-    if shrink_scale > 0.0:
-        x_min = x_min + (x_max - x_min) * shrink_scale / 2.0
-        x_max = x_max - (x_max - x_min) * shrink_scale / 2.0
-        y_min = y_min + (y_max - y_min) * shrink_scale / 2.0
-        y_max = y_max - (y_max - y_min) * shrink_scale / 2.0
-        z_min = z_min + (z_max - z_min) * shrink_scale / 2.0
-        z_max = z_max - (z_max - z_min) * shrink_scale / 2.0
+    if shrink > 0.0:
+        x_span = x_max - x_min
+        y_span = y_max - y_min
+        z_span = z_max - z_min
+        x_min = x_min + 0.5 * shrink * x_span
+        x_max = x_max - 0.5 * shrink * x_span
+        y_min = y_min + 0.5 * shrink * y_span
+        y_max = y_max - 0.5 * shrink * y_span
+        z_min = z_min + 0.5 * shrink * z_span
+        z_max = z_max - 0.5 * shrink * z_span
     position = np.array(
         [
             np.random.uniform(low=x_min, high=x_max),
@@ -52,13 +56,27 @@ def sample_pose_within_roi(roi_bounds, max_tilt, shrink_scale=0.2):
             -np.cos(phi),
         ],
         dtype=np.float32,
-    ).reshape(3)
-    z_axis /= np.linalg.norm(z_axis)
+    )
+    z_norm = np.linalg.norm(z_axis)
+    if z_norm < 1e-6:
+        z_axis = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+    else:
+        z_axis /= z_norm
+
     up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    if abs(np.dot(up, z_axis)) > 0.995:
+        up = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
     x_axis = np.cross(up, z_axis)
-    x_axis /= np.linalg.norm(x_axis)
+    x_norm = np.linalg.norm(x_axis)
+    if x_norm < 1e-6:
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        x_axis = np.cross(up, z_axis)
+        x_norm = np.linalg.norm(x_axis)
+    x_axis /= x_norm
+
     y_axis = np.cross(z_axis, x_axis)
-    y_axis /= np.linalg.norm(y_axis)
+    y_axis /= np.linalg.norm(y_axis) + 1e-9
     rot = np.stack([x_axis, y_axis, z_axis], axis=1).astype(np.float64, copy=False)
     euler = np.array(euler_from_matrix(rot, axes="sxyz"), dtype=np.float32)
     return position, euler
@@ -183,7 +201,7 @@ def publish_camera_frustum(
     rot = quaternion_matrix(quaternion)[:3, :3]
     near_depth = depth_min
     far_depth = depth_max - 0.3
-    far_radius = radius
+    far_radius = 0.1
     near_radius = max(far_radius * (near_depth / far_depth), 1e-3)
 
     marker_mesh = Marker()

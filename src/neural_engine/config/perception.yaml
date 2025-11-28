@@ -18,9 +18,9 @@ sensor:
   constraints:
     depth:
       min: 0.2
-      max: 0.8
-    radius: 0.25
-    orientation: 0.8
+      max: 0.7
+    radius: 0.2
+    orientation: 0.4
 
   dynamics:
     frame_rate: 10

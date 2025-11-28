@@ -122,8 +122,9 @@ class EnvBatch:
 def evaluate_policy(
     env: InspectionEnv,
     model: ActorCritic,
-    episodes: int = 3,
+    episodes: int = 1,
     max_steps: int = 10,
+    reset_voxel_grid: bool = True,
 ) -> str:
     device = next(model.parameters()).device
     model.eval()
@@ -133,8 +134,9 @@ def evaluate_policy(
         "orientation_violation": [],
         "oob_dist": [],
     }
-    for episode_idx in range(episodes):
-        state, _ = env.reset()
+    message = ""
+    for _ in range(episodes):
+        state, _ = env.reset(reset_voxel_grid=reset_voxel_grid)
         episode_breakdown = defaultdict(float)
         for _ in range(max_steps):
             state_t = torch.tensor(state[None, :], dtype=torch.float32, device=device)
@@ -155,15 +157,14 @@ def evaluate_policy(
         for key in ("coverage", "penalty", "orientation_violation", "oob_dist"):
             breakdown_history[key].append(episode_breakdown[key])
         message = (
-            "[Eval] Episode "
-            f"{episode_idx + 1}/{episodes} | steps={episode_breakdown['steps']} "
+            f"Steps={episode_breakdown['steps']} "
             f"| coverage={float(episode_breakdown['coverage']):.3f} "
             f"| penalty={float(episode_breakdown['penalty']):.3f} "
             f"| orientation_violation={float(episode_breakdown['orientation_violation']):.3f} "
             f"| oob_dist={float(episode_breakdown['oob_dist']):.3f}"
         )
-        return message
-    return "N/A"
+        message += f"\n{message}"
+    return message
 
 
 def train(cfg: A3CConfig):
@@ -254,9 +255,7 @@ def train(cfg: A3CConfig):
 
             if step % 100 == 0:
                 eval_return = evaluate_policy(eval_env, model)
-                print(
-                    f"Step {step}/{cfg.total_steps} | Eval: {eval_return}\n"
-                )
+                print(f"Step {step}/{cfg.total_steps} | Eval: {eval_return}")
             if step % 1000 == 0:
                 torch.save(model.state_dict(), CHECKPOINT_PATH)
     except KeyboardInterrupt:
@@ -300,7 +299,9 @@ def main():
             point_stride=cfg.point_stride,
         )
         try:
-            evaluate_policy(viz_env, model, episodes=1, max_steps=20)
+            evaluate_policy(
+                viz_env, model, episodes=20, max_steps=10, reset_voxel_grid=False
+            )
         finally:
             viz_env.close()
     else:
