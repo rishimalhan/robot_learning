@@ -37,6 +37,14 @@ def get_part_mesh_path(part_name: str = PART_NAME) -> str:
     return os.path.join(_assets_root(), f"{part_name}.stl")
 
 
+def get_camera_mesh_path(name: str = "depthcamera") -> str:
+    """Return the absolute path to the camera STL if available."""
+    mesh_path = os.path.join(_assets_root(), f"{name}.stl")
+    if not os.path.exists(mesh_path):
+        raise FileNotFoundError(f"Camera mesh '{name}' not found at {mesh_path}")
+    return mesh_path
+
+
 @lru_cache()
 def get_part_spec(part_name: str = PART_NAME) -> Dict[str, object]:
     """Return a reusable spec dictionary describing the current inspection part."""

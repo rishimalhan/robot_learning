@@ -35,6 +35,8 @@ from neural_engine.utils import (
     publish_pointcloud,
     publish_frame_marker,
     publish_part_marker,
+    publish_camera_frustum,
+    publish_camera_mesh,
 )
 
 PoseTuple = Tuple[np.ndarray, np.ndarray]
@@ -90,22 +92,22 @@ class InspectionEnv(Env):
         self._roi_bounds = self._compute_roi_bounds()
         self._roi_vertices_local = self._compute_roi_vertices_local()
         self._voxel_grid = VoxelGrid(self._part_bounds)
-        self._reward_scale_factor = 10.0
-        self._penalty_scale = 100.0
+        self._reward_scale_factor = 0.5
+        self._penalty_scale = 5.0
         self._ctx = CameraContext()
         self.action_dim = 5  # xyz deltas + roll/pitch deltas (yaw fixed)
         self._action_scale = np.array(
             [
-                0.005,
-                0.005,
-                0.005,
                 0.05,
                 0.05,
+                0.05,
+                0.25,
+                0.25,
             ],
             dtype=np.float32,
         )
         self._ctx.prev_action = np.zeros((self.action_dim,), dtype=np.float32)
-        self._max_steps_threshold = 20
+        self._max_steps_threshold = 10
         self._steps_taken = 0
         depth_dim = int(np.prod(self._voxel_grid.grid_dims[:2]))
         self._latent_dim = 128
@@ -233,11 +235,16 @@ class InspectionEnv(Env):
         return np.asarray(vertices, dtype=np.float32)
 
     def reset(
-        self, *, seed: Optional[int] = None, options: Optional[dict] = None
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[dict] = None,
+        reset_voxel_grid: bool = True,
     ) -> Tuple[np.ndarray, dict]:
         """Reset MuJoCo, resample a feasible camera pose, and clear voxel memory."""
         super().reset(seed=seed)
-        self._voxel_grid.reset()
+        if reset_voxel_grid:
+            self._voxel_grid.reset()
         self._steps_taken = 0
         sampled_pose: Optional[PoseTuple] = None
         cloud_msg: Optional[PointCloud2] = None
@@ -307,10 +314,10 @@ class InspectionEnv(Env):
             )
         self._ctx.prev_action = action.copy()
         scaled_action = action * self._action_scale
-        delta_az   = scaled_action[3]
-        delta_el   = scaled_action[4]
-        R_delta_az = euler_matrix(0, 0, delta_az)[:3, :3]   # global Z rotation
-        R_delta_el = euler_matrix(delta_el, 0, 0)[:3, :3]   # camera X rotation
+        delta_az = scaled_action[3]
+        delta_el = scaled_action[4]
+        R_delta_az = euler_matrix(0, 0, delta_az)[:3, :3]  # global Z rotation
+        R_delta_el = euler_matrix(delta_el, 0, 0)[:3, :3]  # camera X rotation
         pose_local = self._camera_pose_local()
         pos_local = pose_local[:3] + scaled_action[:3]
         rot_local = euler_matrix(*pose_local[3:])[:3, :3]
@@ -350,7 +357,9 @@ class InspectionEnv(Env):
         oob_dist = np.maximum(0.0, pos_world - box_high) + np.maximum(
             0.0, box_low - pos_world
         )
-        drift_mag = float(np.linalg.norm(oob_dist)) + float(orientation_violation) / 10.0
+        drift_mag = (
+            float(np.linalg.norm(oob_dist)) + float(orientation_violation) / 10.0
+        )
         out_of_bounds_penalty = self._penalty_scale * drift_mag
         terminated = drift_mag > 0.0
         # projected_pos = np.clip(pos_world, box_low, box_high)
@@ -385,7 +394,7 @@ class InspectionEnv(Env):
         state = self._build_state(points_camera=points_cam)
         surface_done = self._voxel_grid.is_surface_covered()
         surface_cells = float(self._voxel_grid.surface_mask.sum())
-        if surface_cells > 0.0:
+        if surface_cells > 0.0 and drift_mag <= 0.0:
             coverage_reward = self._reward_scale_factor * (
                 float(delta_cov) / surface_cells
             )
@@ -424,27 +433,27 @@ class InspectionEnv(Env):
             return
         if self._debug_cloud_pub is not None and cloud_msg is not None:
             publish_pointcloud(self._debug_cloud_pub, cloud_msg)
-        if self._marker_pub is not None:
-            publish_frame_marker(
-                self._marker_pub,
-                np.zeros(3, dtype=np.float32),
-                np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
-                "world_axes",
-                1,
-                length=1.0,
-            )
+        # if self._marker_pub is not None:
+        #     publish_frame_marker(
+        #         self._marker_pub,
+        #         np.zeros(3, dtype=np.float32),
+        #         np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        #         "world_axes",
+        #         1,
+        #         length=1.0,
+        #     )
         part_tf = np.eye(4, dtype=np.float64)
         part_tf[:3, :3] = self._part_rotation.astype(np.float64, copy=False)
         part_quat = quaternion_from_matrix(part_tf)
-        if self._marker_pub is not None:
-            publish_frame_marker(
-                self._marker_pub,
-                self._part_centroid,
-                part_quat,
-                "part_axes",
-                2,
-                length=0.5,
-            )
+        # if self._marker_pub is not None:
+        #     publish_frame_marker(
+        #         self._marker_pub,
+        #         self._part_centroid,
+        #         part_quat,
+        #         "part_axes",
+        #         2,
+        #         length=0.5,
+        #     )
         if self._part_marker_pub is not None and self._part_spec is not None:
             publish_part_marker(self._part_marker_pub, self._part_spec)
         curr_quat = quaternion_from_euler(*self._ctx.orientation)
@@ -456,6 +465,25 @@ class InspectionEnv(Env):
                 "camera_active",
                 3,
                 length=0.1,
+            )
+            publish_camera_frustum(
+                self._marker_pub,
+                self._ctx.position,
+                curr_quat,
+                self._depth_min,
+                self._depth_max,
+                self._perception.max_radius,
+                marker_id=4,
+            )
+            publish_camera_mesh(
+                self._marker_pub,
+                self._perception.camera_mesh_path,
+                {
+                    "position": self._ctx.position.tolist(),
+                    "orientation": self._ctx.orientation.tolist(),
+                    "scale": [1.0, 1.0, 1.0],
+                },
+                marker_id=5,
             )
             publish_voxel_grid(self._marker_pub, self._voxel_grid)
 
@@ -534,7 +562,7 @@ if __name__ == "__main__":
 
     num_evals = 20
 
-    env = InspectionEnv(publish_pointcloud=False, visualize=False, point_stride=4)
+    env = InspectionEnv(publish_pointcloud=True, visualize=True, point_stride=4)
     episodes = 1
     start_time = time.time()
     counts = 0
@@ -544,7 +572,7 @@ if __name__ == "__main__":
         for i in range(num_evals):
             counts += 1
             mean = np.zeros(env.action_dim, dtype=np.float32)
-            sigma = np.ones(env.action_dim, dtype=np.float32)
+            sigma = np.ones(env.action_dim, dtype=np.float32) * 0.5
             action = np.random.normal(mean, sigma)
             obs, reward, done, terminated, info = env.step(action)
             print(f"Step -> {i+1}, info={info}\n")

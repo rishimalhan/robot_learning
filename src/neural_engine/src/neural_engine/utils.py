@@ -88,7 +88,7 @@ def publish_pointcloud(pub, cloud_msg):
     if not isinstance(cloud_msg, PointCloud2):
         return
     pub.publish(cloud_msg)
-    rospy.sleep(0.3)
+    rospy.sleep(0.05)
 
 
 def publish_voxel_grid(marker_pub, voxel_grid, frame_id="world"):
@@ -118,7 +118,7 @@ def publish_voxel_grid(marker_pub, voxel_grid, frame_id="world"):
         Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in centers
     ]
     marker_pub.publish(marker)
-    rospy.sleep(0.3)
+    rospy.sleep(0.05)
 
 
 def publish_frame_marker(
@@ -161,7 +161,91 @@ def publish_frame_marker(
     marker.colors = colors
     marker.pose.orientation.w = 1.0
     marker_pub.publish(marker)
-    rospy.sleep(0.3)
+    rospy.sleep(0.05)
+
+
+def publish_camera_frustum(
+    marker_pub,
+    origin,
+    quaternion,
+    depth_min,
+    depth_max,
+    radius,
+    marker_id=60,
+    frame_id="world",
+    segments=32,
+):
+    """Render a truncated frustum that visualizes perception constraints."""
+    if marker_pub is None:
+        return
+    origin = np.asarray(origin, dtype=np.float32)
+    quaternion = np.asarray(quaternion, dtype=np.float32)
+    rot = quaternion_matrix(quaternion)[:3, :3]
+    near_depth = depth_min
+    far_depth = depth_max - 0.3
+    far_radius = radius
+    near_radius = max(far_radius * (near_depth / far_depth), 1e-3)
+
+    marker_mesh = Marker()
+    marker_mesh.header.frame_id = frame_id
+    marker_mesh.header.stamp = rospy.Time.now()
+    marker_mesh.ns = "camera_frustum"
+    marker_mesh.id = marker_id
+    marker_mesh.type = Marker.TRIANGLE_LIST
+    marker_mesh.action = Marker.ADD
+    marker_mesh.color = ColorRGBA(0.1, 0.5, 1.0, 0.2)
+
+    marker_edges = Marker()
+    marker_edges.header.frame_id = frame_id
+    marker_edges.header.stamp = rospy.Time.now()
+    marker_edges.ns = "camera_frustum_edges"
+    marker_edges.id = marker_id + 1
+    marker_edges.type = Marker.LINE_LIST
+    marker_edges.action = Marker.ADD
+    marker_edges.scale.x = 0.003
+    marker_edges.color = ColorRGBA(0.1, 0.6, 1.0, 0.2)
+
+    def to_point(vec):
+        return Point(x=float(vec[0]), y=float(vec[1]), z=float(vec[2]))
+
+    def append_triangle(p_a, p_b, p_c, color):
+        marker_mesh.points.extend([to_point(p_a), to_point(p_b), to_point(p_c)])
+        marker_mesh.colors.extend([color, color, color])
+
+    angles = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    near_pts = []
+    far_pts = []
+    for ang in angles:
+        base_near = np.array(
+            [near_radius * np.cos(ang), near_radius * np.sin(ang), near_depth],
+            dtype=np.float32,
+        )
+        base_far = np.array(
+            [far_radius * np.cos(ang), far_radius * np.sin(ang), far_depth],
+            dtype=np.float32,
+        )
+        near_pts.append(origin + rot @ base_near)
+        far_pts.append(origin + rot @ base_far)
+
+    # Near and far rings
+    for pts in (near_pts, far_pts):
+        for i in range(segments):
+            marker_edges.points.extend(
+                [to_point(pts[i]), to_point(pts[(i + 1) % segments])]
+            )
+    # Walls + rays from apex
+    for i in range(segments):
+        marker_edges.points.extend([to_point(origin), to_point(far_pts[i])])
+        marker_edges.points.extend([to_point(near_pts[i]), to_point(far_pts[i])])
+
+        next_idx = (i + 1) % segments
+        color = ColorRGBA(0.1, 0.5, 1.0, 0.15)
+        append_triangle(origin, far_pts[i], far_pts[next_idx], color)
+        append_triangle(near_pts[i], far_pts[i], far_pts[next_idx], color)
+        append_triangle(near_pts[i], far_pts[next_idx], near_pts[next_idx], color)
+
+    marker_pub.publish(marker_mesh)
+    marker_pub.publish(marker_edges)
 
 
 def publish_part_marker(marker_pub, part_spec, marker_id=50, frame_id="world"):
@@ -198,4 +282,40 @@ def publish_part_marker(marker_pub, part_spec, marker_id=50, frame_id="world"):
     marker.pose.orientation.z = quat[2]
     marker.pose.orientation.w = quat[3]
     marker_pub.publish(marker)
-    rospy.sleep(0.3)
+    rospy.sleep(0.05)
+
+
+def publish_camera_mesh(marker_pub, mesh_path, pose, marker_id=70, frame_id="world"):
+    """Publish the depth camera mesh (if available) at the provided pose."""
+    if marker_pub is None or not mesh_path:
+        return
+    marker = Marker()
+    marker.header.frame_id = frame_id
+    marker.header.stamp = rospy.Time.now()
+    marker.ns = "camera_mesh"
+    marker.id = marker_id
+    marker.type = Marker.MESH_RESOURCE
+    marker.action = Marker.ADD
+    marker.mesh_resource = f"file://{mesh_path}"
+    marker.mesh_use_embedded_materials = False
+
+    scale = pose.get("scale", [1.0, 1.0, 1.0])
+    marker.scale.x = scale[0]
+    marker.scale.y = scale[1]
+    marker.scale.z = scale[2]
+
+    color = ColorRGBA(0.6, 0.3, 3.0, 0.8)
+    marker.color = color
+
+    position = pose.get("position", [0.0, 0.0, 0.0])
+    orientation = pose.get("orientation", [0.0, 0.0, 0.0])
+    marker.pose.position.x = position[0]
+    marker.pose.position.y = position[1]
+    marker.pose.position.z = position[2]
+    quat = quaternion_from_euler(*orientation)
+    marker.pose.orientation.x = quat[0]
+    marker.pose.orientation.y = quat[1]
+    marker.pose.orientation.z = quat[2]
+    marker.pose.orientation.w = quat[3]
+    marker_pub.publish(marker)
+    rospy.sleep(0.05)

@@ -23,7 +23,7 @@ from tf.transformations import (
 # Internal
 
 from core.utils import convert_stl_to_obj
-from neural_engine.scene_assets import get_part_spec
+from neural_engine.scene_assets import get_part_spec, get_camera_mesh_path
 
 
 class SimulatedPerception:
@@ -53,6 +53,10 @@ class SimulatedPerception:
         self.height = intr["height"]
         self.fx = intr["fx"]
         self.fy = intr["fy"]
+        try:
+            self.camera_mesh_path = get_camera_mesh_path()
+        except FileNotFoundError:
+            self.camera_mesh_path = None
 
         depth_cfg = sensor_cfg["constraints"]["depth"]
         self.min_depth = depth_cfg["min"]
@@ -312,7 +316,9 @@ class SimulatedPerception:
         depth_mask = (depth >= self.min_depth) & (depth <= self.max_depth)
 
         xy_dist = np.sqrt(points_cam[:, 0] ** 2 + points_cam[:, 1] ** 2)
-        radius_mask = xy_dist <= self.max_radius
+        radius_scale = np.clip(depth / max(self.max_depth, 1e-6), 0.0, 1.0)
+        radius_limit = radius_scale * self.max_radius
+        radius_mask = xy_dist <= radius_limit
 
         z_axis = np.array([0, 0, 1])
         point_vectors = points_cam / (

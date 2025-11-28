@@ -30,7 +30,7 @@ class VoxelGrid:
         )
         self.voxel_size = self.extents / self.grid_dims.astype(np.float32)
         self.surface_mask = np.zeros(self.grid_dims[:2], dtype=bool)
-        self._coverage_threshold = 3
+        self._coverage_threshold = 2
         self._last_pose_signature = None
         self._pose_tol = 1e-5
         self.reset()
