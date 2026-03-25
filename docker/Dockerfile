@@ -64,9 +64,6 @@ RUN set -eux; \
 # Install required Python packages
 RUN python3 -m pip install --no-cache-dir -r /robot_learning/docker/python-packages.txt
 
-# Copy the rest of the workspace
-COPY . /robot_learning/
-
 # Set up entrypoint script
 COPY docker/entrypoint.sh /entrypoint.sh
 
