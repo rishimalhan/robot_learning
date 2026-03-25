@@ -172,6 +172,7 @@ catkin_install_python(PROGRAMS
   src/neural_engine/inference_engine.py
   src/neural_engine/common.py
   src/neural_engine/viewpoint_generator.py
+  src/neural_engine/mujoco_camera_viewer.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

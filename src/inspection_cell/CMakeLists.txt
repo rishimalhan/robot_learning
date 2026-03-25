@@ -190,6 +190,7 @@ catkin_install_python(PROGRAMS
 install(DIRECTORY
   launch
   config
+  assets
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 

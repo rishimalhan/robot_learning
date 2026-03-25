@@ -5,48 +5,67 @@ USER root
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+ENV HF_HUB_DISABLE_XET=1
+
 # Create workspace
 WORKDIR /robot_learning
-COPY . /robot_learning/
 
-# Ensure essential packages are installed
-RUN apt-get update && \
-    apt-get install -y python3 python3-pip \
-    software-properties-common \
-    curl \
-    wget \
-    gnupg2 \
-    build-essential \
-    git \
-    cmake \
-    iproute2 \
-    iputils-ping \
-    net-tools \
-    novnc \
-    x11vnc \
-    python3-websockify && \
+# Install system dependencies, ROS, and clean apt cache in one layer
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      python3 python3-pip \
+      software-properties-common \
+      curl \
+      wget \
+      gnupg2 \
+      lsb-release \
+      build-essential \
+      git \
+      cmake \
+      iproute2 \
+      iputils-ping \
+      net-tools \
+      novnc \
+      x11vnc \
+      python3-websockify; \
+    mkdir -p /etc/apt/keyrings; \
+    curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc \
+      | gpg --dearmor -o /etc/apt/keyrings/ros-archive-keyring.gpg; \
+    echo "deb [signed-by=/etc/apt/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+      > /etc/apt/sources.list.d/ros-latest.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ros-noetic-desktop-full \
+      python3-rosdep \
+      python3-rosinstall \
+      python3-rosinstall-generator \
+      python3-wstool \
+      python3-catkin-tools; \
+    if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then rosdep init; fi; \
+    rosdep update; \
     rm -rf /var/lib/apt/lists/*
 
-# Allow pip to manage system-wide Python packages (Override PEP 668)
-RUN pip config set global.break-system-packages true
-# Install ROS1
-RUN sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list'
-RUN curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo apt-key add -
-RUN apt update
-RUN apt install ros-noetic-desktop-full -y
-RUN echo "source /opt/ros/noetic/setup.bash" >> ~/.bashrc
-RUN apt install python3-rosdep python3-rosinstall python3-rosinstall-generator python3-wstool build-essential -y
-RUN apt install python3-rosdep -y
-RUN rosdep init
-RUN rosdep update
-# Install catkin for ROS1 package building
-RUN apt-get install -y python3-catkin-tools
+# Allow pip to manage system-wide Python packages if the distro enforces PEP 668
+RUN python3 -m pip config set global.break-system-packages true || true
+
+# Copy dependency manifests early for better caching
+COPY docker/packages.txt /robot_learning/docker/packages.txt
+COPY docker/python-packages.txt /robot_learning/docker/python-packages.txt
 
 # Install additional system packages needed (if any)
-RUN apt-get update && xargs -a /robot_learning/docker/packages.txt apt-get install -y
+RUN set -eux; \
+    apt-get update; \
+    if [ -s /robot_learning/docker/packages.txt ]; then \
+      xargs -a /robot_learning/docker/packages.txt apt-get install -y --no-install-recommends; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 # Install required Python packages
-RUN pip install --no-cache-dir -r /robot_learning/docker/python-packages.txt
+RUN python3 -m pip install --no-cache-dir -r /robot_learning/docker/python-packages.txt
+
+# Copy the rest of the workspace
+COPY . /robot_learning/
 
 # Set up entrypoint script
 COPY docker/entrypoint.sh /entrypoint.sh

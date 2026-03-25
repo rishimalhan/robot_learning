@@ -1,0 +1,10 @@
+accelerate
+bitsandbytes
+bert_score
+peft
+nltk
+kagglehub
+transformers
+tiktoken
+wandb
+datasets

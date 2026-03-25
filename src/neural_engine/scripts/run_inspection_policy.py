@@ -18,11 +18,13 @@ import torch
 
 from neural_engine.rl_environment import InspectionEnv
 from neural_engine.utils import sample_pose_within_roi, pose_within_bounds
+from sensor_msgs.msg import PointCloud2
 from train_a3c_inspection import ActorCritic, CHECKPOINT_PATH, DEVICE
+from visualization_msgs.msg import Marker
 
 
 POINT_RESOLUTION = 0.005  # meters
-DROP_RATIO = 0.7
+DROP_RATIO = 0.2
 
 
 @dataclass
@@ -78,8 +80,8 @@ def prepare_policy_state(env: InspectionEnv, position: np.ndarray, orientation: 
     return state, num_points
 
 
-def greedy_select(candidates: List[PoseCoverage]):
-    """Greedy set-cover over quantized point keys."""
+def greedy_select(candidates: List[PoseCoverage], min_distance: float = 0.1):
+    """Greedy set-cover over quantized point keys with minimum position distance."""
     uncovered = set()
     for cand in candidates:
         uncovered.update(cand.point_keys)
@@ -90,6 +92,16 @@ def greedy_select(candidates: List[PoseCoverage]):
         best = None
         best_gain = 0
         for cand in remaining:
+            # Check minimum distance from already selected poses
+            too_close = False
+            for sel in selected:
+                dist = float(np.linalg.norm(cand.position - sel.position))
+                if dist < min_distance:
+                    too_close = True
+                    break
+            if too_close:
+                continue
+            
             gain = len(cand.point_keys & uncovered)
             if gain > best_gain:
                 best = cand
@@ -175,9 +187,19 @@ def rollout_policy(
             print(f"[Pose {pose_idx}] Zero points detected, resetting environment to preserve coverage...")
             voxel_state = save_voxel_grid_state(env._voxel_grid)
             env.close()
-            new_env = InspectionEnv(publish_pointcloud=False, visualize=True, point_stride=4)
+            new_env = InspectionEnv(publish_pointcloud=False, visualize=False, point_stride=4)
             new_env.reset(reset_voxel_grid=False)
             restore_voxel_grid_state(new_env._voxel_grid, voxel_state)
+            new_env._visualize = True
+            new_env._marker_pub = rospy.Publisher(
+                "/inspection_env/markers", Marker, queue_size=10
+            )
+            new_env._part_marker_pub = rospy.Publisher(
+                "/inspection_env/part_marker", Marker, queue_size=1
+            )
+            new_env._debug_cloud_pub = rospy.Publisher(
+                "/inspection_env/pointcloud", PointCloud2, queue_size=1
+            )
             print(f"[Pose {pose_idx}] Environment reset, coverage preserved: {new_env._voxel_grid.coverage}")
             # Retry with new environment
             state, num_points = prepare_policy_state(new_env, pose.position, pose.orientation)
@@ -224,7 +246,7 @@ def main():
     parser.add_argument(
         "--samples",
         type=int,
-        default=100,
+        default=300,
         help="Number of candidate poses to sample.",
     )
     parser.add_argument(

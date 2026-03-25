@@ -1,0 +1,7 @@
+<launch>
+  <!-- publish static map->world transform if needed -->
+  <node pkg="tf2_ros" type="static_transform_publisher" name="map_world_tf" args="0 0 0 0 0 0 map world" />
+
+  <node pkg="rviz" type="rviz" name="inspection_rviz" args="-d $(find neural_engine)/config/inspection_env.rviz" />
+</launch>
+

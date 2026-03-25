@@ -381,10 +381,10 @@ def main():
     print(f"\nNon-streaming response:\n{response}")
 
     # Example streaming generation
-    print("\nStreaming response:")
-    for token in engine.generate(prompt, stream=True):
-        print(token, end="", flush=True)
-    print()
+    # print("\nStreaming response:")
+    # for token in engine.generate(prompt, stream=True):
+    #     print(token, end="", flush=True)
+    # print()
 
 
 if __name__ == "__main__":

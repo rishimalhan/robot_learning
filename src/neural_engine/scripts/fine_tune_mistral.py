@@ -5,7 +5,7 @@ PEFT: Parameter-Efficient Fine-Tuning
 LoRA: Low rank Adaptation
 Prompt engineering -> Q&A -> RAG -> Fine-tuning
 
-What model 
+What model
 needs to know
 |
 |   RAG                 All of above

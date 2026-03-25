@@ -1,0 +1,61 @@
+Current State (Inspection Stack)
+
+End-to-end flow
+- Top-level script: src/inspection_cell/scripts/run_set_cover.py
+  - Initializes EnvironmentLoader, Planner, Executor, GreedySetCover
+  - Calls generate_viewpoints service, computes greedy cover, executes plans
+- Viewpoint generation: src/neural_engine/src/neural_engine/viewpoint_generator.py
+  - Generates candidate poses via core.utils.sample_roi_poses (ROI from planning scene)
+  - Filters by IK feasibility and by pointcloud visibility (SimulatedPerception)
+- Simulated perception: src/neural_engine/src/neural_engine/simulated_perception.py
+  - Loads part spec from scene_assets.get_part_spec
+  - Builds MuJoCo scene, renders RGB/depth, unprojects to pointcloud
+  - Filters points (depth, radius, orientation constraints, floor)
+- Coverage planner: src/core/src/core/greedy_set_cover.py
+  - Greedy selection by dynamic reward = new points / current points
+- Motion planning & execution: src/core/src/core/planner.py and src/core/src/core/executor.py
+  - MoveIt planning (point-to-point + cartesian), execution via MoveGroup
+- Reconstruction: src/core/src/core/point_cloud_processor.py
+  - Accumulates pointclouds; optional mesh (alpha-shape) and CAD feature placeholder
+- Part spec source: src/neural_engine/src/neural_engine/scene_assets.py
+  - Single hardcoded part name/scale/pose
+
+Strategy (Incremental, Testable Steps)
+
+1) Part library & spec interface
+- Replace hardcoded PART_* in scene_assets.py with data-driven spec (YAML/JSON)
+- Select part by param/service, re-load SimulatedPerception
+- Test: switch part -> non-empty pointcloud
+
+2) Surface/table segmentation prompt
+- Add a node/service for user labeling (CLI, RViz marker, or simple UI)
+- Output: plane model + part mask or labeled pointcloud
+- Test: publish segmented cloud in RViz
+
+3) Auto-fit part into ROI/workspace
+- Use core.utils.get_roi_info() bounds
+- Fit/scale part mesh to ROI constraints
+- Update spec (scale/pose), reload sim
+- Test: part bounds strictly inside ROI
+
+4) Curvature gating
+- Compute curvature on mesh or reconstructed cloud
+- Accept/reject part based on thresholds
+- Test: log metrics and decision
+
+5) Scan planning with constraints
+- Start with current viewpoint generation + greedy cover
+- Add path constraints (normal/angle tolerances) in MoveIt
+- Test: deterministic scan path with zero execution
+
+6) Reconstruction & visualization
+- Extend point_cloud_processor to publish mesh consistently
+- Provide single “reconstruct” action
+
+7) GUI / UX layer
+- Start with RViz panel: select part → segment → auto-fit → curvature check → plan → execute → reconstruct
+- Optionally expose via Gradio later
+
+Notes
+- Each step yields a visible artifact (cloud, mask, fitted part, plan, mesh)
+- Keep steps small and test one change at a time

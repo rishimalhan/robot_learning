@@ -70,6 +70,7 @@ class PointCloudProcessor:
         self.pointcloud_sub = rospy.Subscriber(
             "camera/points", PointCloud2, self.pointcloud_callback, queue_size=1
         )
+        rospy.wait_for_message("camera/points", PointCloud2, timeout=10.0)
 
         features = []
         if enable_reconstruction:

@@ -236,7 +236,7 @@ class EnvironmentLoader:
 
             except Exception as e:
                 rospy.logerr(
-                    f"Failed to load mesh for {name}: {traceback.format_exc(e)}"
+                    f"Failed to load mesh for {name}: {e}\n{traceback.format_exc()}"
                 )
                 return None
 
