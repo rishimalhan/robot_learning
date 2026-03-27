@@ -2,7 +2,6 @@ ipython
 matplotlib
 pandas
 tqdm
-scipy
 torch
 torchvision
 torchaudio
@@ -18,5 +17,4 @@ open3d
 langchain
 langchain-community
 rosnumpy
-tqdm
 gymnasium
