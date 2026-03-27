@@ -9,6 +9,11 @@
   <arg name="sim" default="true" />
   <arg name="robot_ip" unless="$(arg sim)" />
 
+  <!-- The ROS-Industrial simulator/action bridge expects the ABB joint names
+       to be present on the parameter server. Without this, the
+       joint_trajectory_action server never comes up cleanly. -->
+  <rosparam command="load" file="$(find abb_irb2400_support)/config/joint_names_irb2400.yaml" />
+
   <!-- Set up the TF tree -->
   <node pkg="tf2_ros" type="static_transform_publisher" name="world_broadcaster" args="0 0 0 0 0 0 world base_link" />
   <node pkg="tf2_ros" type="static_transform_publisher" name="map_broadcaster" args="0 0 0 0 0 0 map world" />

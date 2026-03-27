@@ -24,6 +24,17 @@ catkin config --jobs 14 -DCMAKE_BUILD_TYPE=Release
 4. Train Octo using the demonstrations
 5. Deploy the octo model for evaluation using an interface similar to the interface we built for the teleop app in step 1
 
+# ROS IPs
+# Container
+export ROS_MASTER_URI=http://10.0.0.102:11311
+unset ROS_HOSTNAME
+export ROS_IP=10.0.0.102
+# Mac
+export ROS_MASTER_URI=http://10.0.0.102:11311
+export ROS_IP=10.0.0.102
+unset ROS_HOSTNAME
+
+
 # Prototyping a Agent based robotic cell
 
 
